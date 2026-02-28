@@ -140,13 +140,15 @@ export async function startDeployment({
 
   activeDeployments.set(deployId, deployment);
 
-  // Run agent in background
-  runDeployAgent(deployment, apiKey, useSubscription, authConfig.claudeCliPath || "claude").catch((err) => {
-    deployment.status = "failed";
-    deployment.error = err.message;
-    addLog(deployment, `Deploy failed: ${err.message}`);
-    cleanupFailedDeploy(name, port);
-  });
+  // Run deploy in background — setTimeout ensures it doesn't block the response
+  setTimeout(() => {
+    runDeployAgent(deployment, apiKey, useSubscription, authConfig.claudeCliPath || "claude").catch((err) => {
+      deployment.status = "failed";
+      deployment.error = err.message;
+      addLog(deployment, `Deploy failed: ${err.message}`);
+      cleanupFailedDeploy(name, port);
+    });
+  }, 0);
 
   return { deployId, name, port };
 }
@@ -414,11 +416,27 @@ async function runDeployViaCLI(deployment: Deployment, claudeCliPath: string) {
 }
 
 async function runDeployAgent(deployment: Deployment, apiKey: string | null, useSubscription: boolean, claudeCliPath: string) {
-  addLog(deployment, "Starting agent-driven deployment...");
+  addLog(deployment, "Starting deployment...");
   addLog(deployment, `Instance: ${deployment.name} | Port: ${deployment.port} | Template: ${deployment.template}`);
-  addLog(deployment, useSubscription ? "Using Claude subscription via CLI..." : "Using Anthropic API key...");
 
-  if (useSubscription) {
+  // Use deterministic deploy (more reliable than agent-driven)
+  // Falls back to API agent only if direct deploy fails and API key is available
+  try {
+    addLog(deployment, "Using direct deploy (deterministic)...");
+    return await runDeployDirect(deployment);
+  } catch (directErr: unknown) {
+    const errMsg = directErr instanceof Error ? directErr.message : String(directErr);
+    addLog(deployment, `Direct deploy failed: ${errMsg}`);
+    
+    if (!apiKey) {
+      throw directErr; // No API key to fall back to
+    }
+    addLog(deployment, "Falling back to API agent deploy...");
+  }
+
+  // Fallback: API agent (not CLI, to avoid nesting issues)
+  if (false && useSubscription) {
+    // Disabled: CLI deploy can't run nested inside another Claude session
     return runDeployViaCLI(deployment, claudeCliPath);
   }
 
@@ -521,4 +539,149 @@ async function runDeployAgent(deployment: Deployment, apiKey: string | null, use
     deployment.status = "complete";
     deployment.result = { name: deployment.name, port: deployment.port };
   }
+}
+
+/**
+ * Deterministic deploy: runs openclaw commands directly without an AI agent.
+ * More reliable than agent-driven deploy for well-known setup steps.
+ */
+async function runDeployDirect(deployment: Deployment) {
+  const { name, port, profileDir, template } = deployment;
+
+  const run = async (cmd: string, label?: string): Promise<string> => {
+    if (label) addLog(deployment, label);
+    addLog(deployment, `$ ${cmd}`);
+    return new Promise((resolve, reject) => {
+      const { exec: execAsync } = require("node:child_process");
+      execAsync(cmd, {
+        encoding: "utf-8",
+        timeout: 120000,
+        cwd: HOME,
+        env: { ...process.env },
+        maxBuffer: 1024 * 1024,
+      }, (err: any, stdout: string, stderr: string) => {
+        if (err) {
+          const msg = (stderr || stdout || err.message || "Command failed").toString().trim();
+          addLog(deployment, `Error: ${msg.slice(0, 500)}`);
+          reject(new Error(msg.slice(0, 200)));
+          return;
+        }
+        const trimmed = (stdout || "").trim();
+        if (trimmed) addLog(deployment, trimmed);
+        resolve(trimmed || "(no output)");
+      });
+    });
+  };
+
+  // Step 1: Verify openclaw
+  addLog(deployment, "🔍 Checking OpenClaw installation...");
+  try {
+    await run("which openclaw && openclaw --version");
+  } catch {
+    addLog(deployment, "Installing OpenClaw...");
+    await run("npm install -g openclaw@latest");
+  }
+
+  // Step 2: Onboard
+  addLog(deployment, "📦 Creating instance profile...");
+  await run(
+    `openclaw --profile ${name} onboard --non-interactive --accept-risk --flow quickstart --gateway-port ${port} --gateway-bind loopback --gateway-auth token --auth-choice skip --install-daemon --skip-channels --skip-skills --skip-ui --skip-health`
+  );
+
+  // Step 3: Configure
+  addLog(deployment, "⚙️ Configuring gateway...");
+  const configPath = join(profileDir, "openclaw.json");
+  if (existsSync(configPath)) {
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    
+    // Enable HTTP endpoints
+    if (!config.gateway) config.gateway = {};
+    config.gateway.http = {
+      endpoints: {
+        chatCompletions: { enabled: true },
+        responses: { enabled: true },
+      },
+    };
+
+    // Anti-idle settings
+    if (!config.agents) config.agents = {};
+    if (!config.agents.defaults) config.agents.defaults = {};
+    config.agents.defaults.heartbeat = { every: "5m" };
+    if (!config.session) config.session = {};
+    config.session.reset = { idleMinutes: 1440 };
+
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+    addLog(deployment, "Config updated with HTTP endpoints + anti-idle settings");
+  }
+
+  // Step 4: Workspace + SOUL
+  addLog(deployment, "📝 Creating workspace...");
+  const { mkdirSync } = require("node:fs");
+  mkdirSync(join(profileDir, "workspace"), { recursive: true });
+  writeFileSync(
+    join(profileDir, "workspace", "SOUL.md"),
+    `# ${name}\nYou are a ${template || "general"} AI assistant deployed via Mission Control.\n`
+  );
+
+  // Step 5: Install service
+  addLog(deployment, "🔧 Installing gateway service...");
+  try {
+    await run(`openclaw --profile ${name} gateway install`);
+  } catch {
+    addLog(deployment, "Gateway install skipped (may already exist)");
+  }
+
+  // Step 6: Doctor
+  try {
+    await run(`openclaw --profile ${name} doctor --fix`);
+  } catch {
+    addLog(deployment, "Doctor completed with warnings");
+  }
+
+  // Step 7: Start
+  addLog(deployment, "🚀 Starting gateway...");
+  await run(`openclaw --profile ${name} gateway start`);
+
+  // Step 8: Verify
+  addLog(deployment, "✅ Verifying...");
+  await new Promise((r) => setTimeout(r, 3000));
+  try {
+    await run(`openclaw --profile ${name} gateway status`);
+  } catch {}
+
+  // Also verify HTTP
+  let alive = false;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000) });
+      if (resp.status < 500) { alive = true; break; }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  if (!alive) {
+    addLog(deployment, "⚠️ Gateway not responding yet — may still be starting");
+  } else {
+    addLog(deployment, `✅ Gateway alive on port ${port}`);
+  }
+
+  // Register
+  let token: string | null = null;
+  try {
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    token = config?.gateway?.auth?.token || config?.gateway?.token || null;
+  } catch {}
+
+  await registerInstance({
+    name,
+    displayName: deployment.displayName,
+    port,
+    token,
+    template: deployment.template,
+    profileDir,
+  });
+
+  deployment.status = "complete";
+  deployment.result = { name, port, token };
+  addLog(deployment, `🎉 Instance "${name}" deployed successfully!`);
 }
