@@ -230,3 +230,4 @@ summary, label[for], select, input[type="checkbox"], input[type="radio"],
 [tabindex]:not([tabindex="-1"]) {
   cursor: pointer;
 }
+@import "@xterm/xterm/css/xterm.css";

@@ -142,7 +142,7 @@ export default function InstanceDetailPage({
       >
         <Link
           href="/"
-          className="inline-flex items-center gap-2 transition-colors" style={{ color: "var(--mc-muted)" }} text-sm transition-colors"
+          className="inline-flex items-center gap-2 text-sm transition-colors" style={{ color: "var(--mc-muted)" }}
         >
           <ArrowLeft className="w-4 h-4" />
           Dashboard
@@ -168,7 +168,7 @@ export default function InstanceDetailPage({
               <h1 className="font-heading text-2xl font-semibold">
                 {instance.displayName || instance.name}
               </h1>
-              <p className="text-sm" style={{ color: "var(--mc-muted)" }} text-sm mt-0.5 font-mono">
+              <p className="text-sm mt-0.5 font-mono" style={{ color: "var(--mc-muted)" }}>
                 {instance.name}
               </p>
             </div>
@@ -180,7 +180,7 @@ export default function InstanceDetailPage({
                 size="sm"
                 onClick={() => handleAction("stop")}
                 disabled={actionLoading}
-                className="transition-colors" style={{ color: "var(--mc-muted)" }} border" style={{ borderColor: "var(--mc-border)" }} gap-2 rounded-xl"
+                className="transition-colors gap-2 rounded-xl" style={{ color: "var(--mc-muted)", borderColor: "var(--mc-border)", border: "1px solid" }}
               >
                 <Square className="w-3.5 h-3.5" />
                 Stop
@@ -222,7 +222,7 @@ export default function InstanceDetailPage({
           </div>
         </div>
 
-        <div className="flex items-center gap-6 mt-5 pt-5 border-t border-0" style={{ borderTop: "1px solid var(--mc-border)" }}">
+        <div className="flex items-center gap-6 mt-5 pt-5" style={{ borderTop: "1px solid var(--mc-border)" }}>
           <StatusBadge live={!!instance.live} />
           <InfoChip icon={Globe} label="Port" value={String(instance.port)} />
           <InfoChip icon={Clock} label="Created" value={uptime} />
@@ -325,7 +325,7 @@ function StatusBadge({ live }: { live: boolean }) {
       className={`inline-flex items-center gap-2 text-xs font-medium px-3 py-1 rounded-full ${
         live
           ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-          : "bg-white/5 text-white/40 border border-0" style={{ borderTop: "1px solid var(--mc-border)" }}"
+          : "bg-white/5 text-white/40 border border-white/10"
       }`}
     >
       <div
@@ -351,8 +351,8 @@ function InfoChip({
 }) {
   return (
     <div className="flex items-center gap-2 text-sm">
-      <Icon className="w-3.5 h-3.5 text-sm" style={{ color: "var(--mc-muted)" }}" />
-      <span className="text-sm" style={{ color: "var(--mc-muted)" }}">{label}:</span>
+      <Icon className="w-3.5 h-3.5" />
+      <span className="text-sm" style={{ color: "var(--mc-muted)" }}>{label}:</span>
       <span className="text-white/70">{value}</span>
     </div>
   );

@@ -11,6 +11,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Server,
+  MessageSquare,
 } from "lucide-react";
 
 interface Instance {
@@ -23,6 +24,7 @@ interface Instance {
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/chat", label: "Chat", icon: MessageSquare },
   { href: "/deploy", label: "Deploy", icon: Rocket },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

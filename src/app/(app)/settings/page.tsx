@@ -180,6 +180,24 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleDisconnect() {
+    setError(null);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error || "Failed to disconnect");
+        return;
+      }
+      await new Promise(r => setTimeout(r, 300));
+      await fetchSettings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to disconnect");
+    }
+  }
+
   async function handleConnectSubscription() {
     setConnectingOAuth(true);
     setError(null);
@@ -382,28 +400,49 @@ export default function SettingsPage() {
                     </div>
                   </div>
 
-                  <Button
-                    onClick={handleConnectSubscription}
-                    disabled={connectingOAuth}
-                    className="w-full text-white rounded-xl h-11 text-sm font-medium gap-2"
-                    style={{ backgroundColor: "var(--mc-accent)" }}
-                  >
-                    {connectingOAuth ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Connecting...
-                      </>
-                    ) : (
-                      <>
-                        <ExternalLink className="w-4 h-4" />
-                        Connect Claude Subscription
-                      </>
-                    )}
-                  </Button>
-
-                  <p className="text-xs text-center" style={{ color: "var(--mc-muted)", opacity: 0.5 }}>
-                    Requires Claude Pro ($20/mo), Max ($100/mo), or Team plan
-                  </p>
+                  {settings?.authMethod === "subscription" ? (
+                    <div className="flex gap-3">
+                      <div
+                        className="flex-1 flex items-center justify-center gap-2 rounded-xl h-11 text-sm font-medium border"
+                        style={{ borderColor: "var(--mc-border)", color: "var(--mc-muted)" }}
+                      >
+                        <CheckCircle className="w-4 h-4 text-emerald-400" />
+                        Subscription Connected
+                      </div>
+                      <Button
+                        onClick={handleDisconnect}
+                        variant="ghost"
+                        className="rounded-xl h-11 text-sm font-medium gap-2 text-red-400 hover:text-red-300 border"
+                        style={{ borderColor: "rgba(239,68,68,0.2)" }}
+                      >
+                        Disconnect
+                      </Button>
+                    </div>
+                  ) : (
+                    <>
+                      <Button
+                        onClick={handleConnectSubscription}
+                        disabled={connectingOAuth}
+                        className="w-full text-white rounded-xl h-11 text-sm font-medium gap-2"
+                        style={{ backgroundColor: "var(--mc-accent)" }}
+                      >
+                        {connectingOAuth ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Connecting...
+                          </>
+                        ) : (
+                          <>
+                            <ExternalLink className="w-4 h-4" />
+                            Connect Claude Subscription
+                          </>
+                        )}
+                      </Button>
+                      <p className="text-xs text-center" style={{ color: "var(--mc-muted)", opacity: 0.5 }}>
+                        Requires Claude Pro ($20/mo), Max ($100/mo), or Team plan
+                      </p>
+                    </>
+                  )}
                 </motion.div>
               ) : (
                 <motion.div

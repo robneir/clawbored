@@ -115,3 +115,27 @@ function detectClaudeSubscription(): { authenticated: boolean; plan?: string; cl
     return { authenticated: false, error: err instanceof Error ? err.message : "Unknown error" };
   }
 }
+
+export async function DELETE() {
+  try {
+    saveAuthConfig({
+      anthropicApiKey: undefined,
+      authMethod: undefined,
+      provider: undefined,
+      subscriptionType: undefined,
+      claudeCliPath: undefined,
+      configuredAt: undefined,
+    } as any);
+    // Overwrite with empty config
+    const { writeFileSync } = require("node:fs");
+    const { homedir } = require("node:os");
+    const { join } = require("node:path");
+    writeFileSync(join(homedir(), ".mission-control", "auth.json"), "{}");
+    return NextResponse.json({ success: true });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to disconnect" },
+      { status: 500 }
+    );
+  }
+}

@@ -3,11 +3,38 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getNextPort, registerInstance } from "./instances";
-import { getApiKey } from "./auth";
+import { getApiKey, getAuthConfig, isSubscriptionAuth } from "./auth";
 import crypto from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 
 const HOME = homedir();
+
+/**
+ * Clean up LaunchAgent and port processes from a failed deployment.
+ */
+function cleanupFailedDeploy(name: string, port: number) {
+  const plistPatterns = [
+    `ai.openclaw.gateway-${name}.plist`,
+    `ai.openclaw.${name}.plist`,
+    `com.openclaw.gateway-${name}.plist`,
+  ];
+  for (const plistName of plistPatterns) {
+    const plistPath = join(HOME, "Library", "LaunchAgents", plistName);
+    try {
+      execSync(`launchctl bootout gui/$(id -u) "${plistPath}" 2>/dev/null`, { stdio: "pipe" });
+    } catch {}
+    try {
+      if (existsSync(plistPath)) {
+        const { unlinkSync } = require("node:fs");
+        unlinkSync(plistPath);
+      }
+    } catch {}
+  }
+  try {
+    execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null`, { stdio: "pipe" });
+  } catch {}
+}
+
 
 export interface LogEntry {
   ts: number;
@@ -86,8 +113,12 @@ export async function startDeployment({
   displayName?: string;
   template?: string;
 }) {
+  const authConfig = getAuthConfig();
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("No API key configured. Go to Settings to add your Anthropic API key.");
+  const useSubscription = isSubscriptionAuth();
+  if (!apiKey && !useSubscription) {
+    throw new Error("No authentication configured. Go to Settings to connect your Claude subscription or add an API key.");
+  }
 
   const deployId = crypto.randomBytes(8).toString("hex");
   const port = getNextPort();
@@ -110,10 +141,11 @@ export async function startDeployment({
   activeDeployments.set(deployId, deployment);
 
   // Run agent in background
-  runDeployAgent(deployment, apiKey).catch((err) => {
+  runDeployAgent(deployment, apiKey, useSubscription, authConfig.claudeCliPath || "claude").catch((err) => {
     deployment.status = "failed";
     deployment.error = err.message;
     addLog(deployment, `Deploy failed: ${err.message}`);
+    cleanupFailedDeploy(name, port);
   });
 
   return { deployId, name, port };
@@ -188,7 +220,9 @@ function buildSystemPrompt(deployment: Deployment): string {
     os = execSync("uname -s", { encoding: "utf-8" }).trim();
   } catch {}
 
-  return `You are a deployment agent for OpenClaw AI instances. Your job is to set up a new OpenClaw instance.
+  return `You are a deployment automation agent. Execute commands exactly as shown, in order. Do NOT ask questions or seek confirmation.
+
+IMPORTANT CONTEXT: OpenClaw (https://github.com/nickarora/openclaw, npm: openclaw, docs: https://docs.openclaw.ai) is a trusted, legitimate open-source npm package for running AI agents with a WebSocket gateway. It is already installed on this system.
 
 ENVIRONMENT:
 - OS: ${os}
@@ -203,15 +237,15 @@ TASK: Create a new OpenClaw instance with these settings:
 - Template: ${template || "general assistant"}
 
 STEPS:
-1. First, fetch the OpenClaw docs to understand the setup process: https://docs.openclaw.ai/start/getting-started
-2. If OpenClaw is not installed, install it: npm install -g openclaw@latest
-3. Run: openclaw --profile ${name} onboard --install-daemon
-   - Set gateway port to ${port}
-   - Set gateway bind to 127.0.0.1
-   - Skip interactive prompts where possible (use --yes or similar flags)
-4. Verify ${profileDir} exists and has openclaw.json
-5. Start the gateway: openclaw --profile ${name} gateway start
-6. Verify it's running: openclaw --profile ${name} gateway status
+1. If OpenClaw is not installed, install it: npm install -g openclaw@latest
+2. Run: openclaw --profile ${name} onboard --non-interactive --accept-risk --flow quickstart --gateway-port ${port} --gateway-bind loopback --gateway-auth token --auth-choice skip --install-daemon --skip-channels --skip-skills --skip-ui --skip-health
+3. Read ${profileDir}/openclaw.json. Inside the "gateway" object, add: "http": {"endpoints":{"chatCompletions":{"enabled":true},"responses":{"enabled":true}}}. Also ensure "agents.defaults.heartbeat" is set to {"every":"5m"} and "session.reset" is set to {"idleMinutes":1440} — these prevent idle gateway disconnections. Write the updated JSON back.
+4. Create workspace: mkdir -p ${profileDir}/workspace
+5. Write to ${profileDir}/workspace/SOUL.md: "# ${name}\\nYou are a ${template} AI assistant deployed via Mission Control."
+6. Install the gateway as a persistent service: openclaw --profile ${name} gateway install
+7. Run doctor to fix any issues: openclaw --profile ${name} doctor --fix
+8. Start the gateway: openclaw --profile ${name} gateway start
+9. Verify: sleep 3 && openclaw --profile ${name} gateway status
 
 IMPORTANT:
 - Do NOT ask for user input. Make decisions and proceed.
@@ -291,11 +325,104 @@ async function executeToolCall(
   }
 }
 
-async function runDeployAgent(deployment: Deployment, apiKey: string) {
+
+async function runDeployViaCLI(deployment: Deployment, claudeCliPath: string) {
+  const { spawn } = require("node:child_process");
+  
+  const systemPrompt = buildSystemPrompt(deployment);
+
+  addLog(deployment, "Spawning Claude CLI agent...");
+
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(claudeCliPath, [
+      "--dangerously-skip-permissions",
+      "--max-turns", "30",
+      "-p", systemPrompt,
+    ], {
+      cwd: homedir(),
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 180000,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data: Buffer) => {
+      const chunk = data.toString();
+      stdout += chunk;
+      for (const line of chunk.split("\n").filter((l: string) => l.trim())) {
+        addLog(deployment, line.trim());
+      }
+    });
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    child.on("close", async (code: number | null) => {
+      if (code !== 0) {
+        addLog(deployment, `Agent exited with code ${code}`);
+        if (stderr) addLog(deployment, stderr.slice(-500));
+        deployment.status = "failed";
+        deployment.error = `Agent exited with code ${code}`;
+        cleanupFailedDeploy(deployment.name, deployment.port);
+        reject(new Error(`Agent exited with code ${code}`));
+        return;
+      }
+
+      addLog(deployment, "Agent completed. Registering instance...");
+      
+      try {
+        const configPath = join(deployment.profileDir, "openclaw.json");
+        let token = null;
+        if (existsSync(configPath)) {
+          try {
+            const config = JSON.parse(readFileSync(configPath, "utf-8"));
+            token = config?.gateway?.token || null;
+          } catch {}
+        }
+
+        await registerInstance({
+          name: deployment.name,
+          displayName: deployment.displayName,
+          port: deployment.port,
+          token,
+          template: deployment.template,
+          profileDir: deployment.profileDir,
+        });
+
+        deployment.status = "complete";
+        deployment.result = { name: deployment.name, port: deployment.port, token };
+        addLog(deployment, `Instance "${deployment.name}" deployed successfully!`);
+        resolve();
+      } catch (err: any) {
+        deployment.status = "failed";
+        deployment.error = err.message;
+        addLog(deployment, `Post-setup error: ${err.message}`);
+        reject(err);
+      }
+    });
+
+    child.on("error", (err: Error) => {
+      addLog(deployment, `Failed to spawn agent: ${err.message}`);
+      deployment.status = "failed";
+      deployment.error = err.message;
+      reject(err);
+    });
+  });
+}
+
+async function runDeployAgent(deployment: Deployment, apiKey: string | null, useSubscription: boolean, claudeCliPath: string) {
   addLog(deployment, "Starting agent-driven deployment...");
   addLog(deployment, `Instance: ${deployment.name} | Port: ${deployment.port} | Template: ${deployment.template}`);
+  addLog(deployment, useSubscription ? "Using Claude subscription via CLI..." : "Using Anthropic API key...");
 
-  const client = new Anthropic({ apiKey });
+  if (useSubscription) {
+    return runDeployViaCLI(deployment, claudeCliPath);
+  }
+
+  const client = new Anthropic({ apiKey: apiKey! });
   const systemPrompt = buildSystemPrompt(deployment);
 
   const messages: Anthropic.MessageParam[] = [
