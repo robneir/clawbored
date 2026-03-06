@@ -169,18 +169,40 @@ function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentParam, scrollToTimestamp]);
 
+  // Track the current agent IDs to detect profile switches
+  const prevAgentIdsRef = useRef<string>("");
+
   // Sync agents from SSE live data
   useEffect(() => {
     if (live.agents.length > 0) {
       const data = live.agents as unknown as Agent[];
+      const newIds = data.map((a) => a.id).sort().join(",");
+      const profileChanged = prevAgentIdsRef.current !== "" && newIds !== prevAgentIdsRef.current;
+      prevAgentIdsRef.current = newIds;
+
       setAgents(data);
-      // Fetch previews once on first load
+
+      // Profile switch detected — clear all stale state and re-select
+      if (profileChanged) {
+        conversationStore.clear();
+        messageQueues.clear();
+        processingSet.clear();
+        historyLoaded.clear();
+        previewsFetched.current = false;
+        setMessages([]);
+        setInput("");
+        setIsStreaming(false);
+        abortRef.current = null;
+      }
+
+      // Fetch previews on first load or after profile switch
       if (!previewsFetched.current && data.length > 0) {
         previewsFetched.current = true;
         fetchPreviews(data.map((a) => a.id));
       }
-      // Auto-select agent only on the very first load
-      if (!agentSelectedRef.current && data.length > 0) {
+
+      // Auto-select agent on first load or after profile switch
+      if ((!agentSelectedRef.current || profileChanged) && data.length > 0) {
         agentSelectedRef.current = true;
         const target = agentParam
           ? data.find((a) => a.id === agentParam)
