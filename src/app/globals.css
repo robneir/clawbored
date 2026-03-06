@@ -162,6 +162,14 @@ html *:not([class*="animate-"]) {
   border-color: var(--mc-border);
 }
 
+/* Floating style — remove structural borders so elements float on one background */
+.mc-floating .border-r,
+.mc-floating .border-b,
+.mc-floating .border-t,
+.mc-floating .border-l {
+  border-color: transparent !important;
+}
+
 /* Status dot glow */
 .status-dot-running {
   width: 8px;

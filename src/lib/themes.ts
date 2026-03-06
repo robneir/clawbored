@@ -30,6 +30,7 @@ export interface StylePreset {
   surfaceOpacity: number;
   borderOpacity: number;
   spacing: "compact" | "comfortable" | "spacious";
+  sidebarTransparent?: boolean;
 }
 
 export const themes: Theme[] = [
@@ -664,10 +665,11 @@ export const stylePresets: StylePreset[] = [
     name: "floating",
     label: "Floating",
     radius: "20px",
-    glassBlur: "16px",
-    surfaceOpacity: 0.04,
-    borderOpacity: 0.01,
-    spacing: "comfortable",
+    glassBlur: "0px",
+    surfaceOpacity: 0,
+    borderOpacity: 0,
+    spacing: "spacious",
+    sidebarTransparent: true,
   },
   {
     name: "notebook",
@@ -803,6 +805,17 @@ export function applyStylePreset(preset: StylePreset, theme?: Theme) {
   // Update spacing class on body
   document.body.classList.remove("mc-compact", "mc-comfortable", "mc-spacious");
   document.body.classList.add(`mc-${preset.spacing}`);
+
+  // Floating mode: sidebar becomes same as page bg, structural borders hidden via CSS
+  if (preset.sidebarTransparent) {
+    const bg = root.style.getPropertyValue("--mc-bg") || getComputedStyle(root).getPropertyValue("--mc-bg");
+    root.style.setProperty("--mc-sidebar", bg);
+    root.style.setProperty("--sidebar", bg);
+    root.style.setProperty("--popover", bg);
+    document.body.classList.add("mc-floating");
+  } else {
+    document.body.classList.remove("mc-floating");
+  }
 }
 
 function getCurrentThemeFromDOM(): Theme | null {
