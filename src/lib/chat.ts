@@ -1,4 +1,14 @@
-import { getInstance } from "./instances";
+import { getGateway } from "./gateway";
+
+export interface ChatAttachment {
+  filename: string;
+  mimeType: string;
+  size: number;
+  storagePath?: string;
+  url?: string;
+  base64?: string;
+  status: "pending" | "uploaded" | "error";
+}
 
 export interface ChatMessage {
   id: string;
@@ -6,37 +16,42 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   status?: "sent" | "queued" | "sending" | "error";
+  attachments?: ChatAttachment[];
 }
 
 export interface ChatConversation {
-  instanceName: string;
+  agentId: string;
   messages: ChatMessage[];
 }
 
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 /**
- * Send a message to an OpenClaw instance via the chat completions API.
- * Returns a ReadableStream for SSE streaming.
+ * Send a message to an OpenClaw agent via the chat completions API.
+ * Routes to the specific agent within the single gateway.
  */
 export async function sendMessage(
-  instanceName: string,
-  messages: { role: string; content: string }[],
+  agentId: string,
+  messages: { role: string; content: string | ContentPart[] }[],
   stream = true
 ): Promise<Response> {
-  const inst = getInstance(instanceName);
-  if (!inst.token) {
-    throw new Error(`Instance "${instanceName}" has no auth token configured`);
+  const gw = await getGateway();
+  if (!gw.token) {
+    throw new Error("Gateway has no auth token configured");
   }
 
-  const url = `http://127.0.0.1:${inst.port}/v1/chat/completions`;
+  const url = `http://127.0.0.1:${gw.port}/v1/chat/completions`;
 
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${inst.token}`,
+      Authorization: `Bearer ${gw.token}`,
     },
     body: JSON.stringify({
-      model: "openclaw:main",
+      model: `openclaw:${agentId}`,
       messages,
       stream,
     }),
@@ -49,43 +64,4 @@ export async function sendMessage(
   }
 
   return res;
-}
-
-/**
- * Check if an instance is currently processing a request (busy).
- * We use the tools/invoke endpoint to check session status.
- */
-export async function isInstanceBusy(instanceName: string): Promise<boolean> {
-  const inst = getInstance(instanceName);
-  if (!inst.token) return false;
-
-  try {
-    const res = await fetch(`http://127.0.0.1:${inst.port}/tools/invoke`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${inst.token}`,
-      },
-      body: JSON.stringify({
-        tool: "sessions_list",
-        action: "json",
-        args: {},
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!res.ok) return false;
-    const data = await res.json();
-    // Check if any session has an active run
-    if (data?.ok && data?.result) {
-      const sessions = Array.isArray(data.result) ? data.result : [];
-      return sessions.some(
-        (s: { activeRun?: boolean; state?: string }) =>
-          s.activeRun || s.state === "running"
-      );
-    }
-    return false;
-  } catch {
-    return false;
-  }
 }

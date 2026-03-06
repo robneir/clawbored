@@ -1,243 +1,676 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { motion } from "framer-motion";
 import {
   Key,
   CheckCircle,
-  AlertCircle,
-  Eye,
-  EyeOff,
-  Shield,
   Loader2,
   LogIn,
-  User,
   ExternalLink,
-  Check,
   Palette,
+  Trash2,
+  Server,
+  Type,
+  Layout,
+  Terminal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { PasswordInput } from "@/components/password-input";
 import { useTheme } from "@/components/theme-provider";
-import { type Theme } from "@/lib/themes";
+import { ThemeCard, FontCard, StyleCard } from "@/components/appearance-cards";
+import { AnthropicIcon, OpenAIIcon } from "@/components/provider-icons";
+import { PROVIDERS as AI_PROVIDERS, type ProviderConfig } from "@/lib/providers";
+import { toast } from "sonner";
 
-interface SettingsData {
-  hasApiKey: boolean;
-  authMethod: string | null;
+interface ProviderKeyData {
   provider: string;
-  configuredAt: string | null;
-  keyHint: string | null;
+  displayName: string;
+  validated: boolean;
+  keyHint: string;
+  configuredAt: string;
 }
 
-function ThemeCard({
-  theme,
-  isSelected,
-  onClick,
+interface OAuthProviderStatus {
+  connected: boolean;
+  type?: string;
+}
+
+interface OAuthStatus {
+  providers: Record<string, OAuthProviderStatus>;
+}
+
+// ── Provider icon lookup ─────────────────────────────────────
+
+const PROVIDER_ICONS: Record<string, React.ComponentType<{ size?: number; className?: string; style?: React.CSSProperties }>> = {
+  anthropic: AnthropicIcon,
+  openai: OpenAIIcon,
+};
+
+// ── Provider Card ───────────────────────────────────────────
+
+function ProviderCard({
+  provider,
+  keyData,
+  oauthStatus,
+  onUpdate,
   index,
 }: {
-  theme: Theme;
-  isSelected: boolean;
-  onClick: () => void;
+  provider: ProviderConfig;
+  keyData: ProviderKeyData | null;
+  oauthStatus: OAuthProviderStatus | null;
+  onUpdate: () => void;
   index: number;
 }) {
-  return (
-    <motion.button
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: index * 0.04, duration: 0.3 }}
-      onClick={onClick}
-      className="group relative flex flex-col items-center gap-2 outline-none focus-visible:ring-2 focus-visible:ring-white/20 rounded-xl"
-    >
-      {/* Preview card */}
-      <div
-        className="relative w-[120px] h-[72px] rounded-xl overflow-hidden border-2 transition-all duration-200"
-        style={{
-          backgroundColor: theme.bg,
-          borderColor: isSelected ? theme.accent : "transparent",
-        }}
-      >
-        {/* Accent bar */}
-        <div
-          className="absolute top-0 left-0 right-0 h-[6px]"
-          style={{ backgroundColor: theme.accent }}
-        />
-        {/* Content preview lines */}
-        <div className="absolute top-[14px] left-3 right-3 space-y-[6px]">
-          <div
-            className="h-[4px] rounded-full w-3/4"
-            style={{ backgroundColor: theme.text, opacity: 0.6 }}
-          />
-          <div
-            className="h-[4px] rounded-full w-1/2"
-            style={{ backgroundColor: theme.text, opacity: 0.3 }}
-          />
-          <div
-            className="h-[4px] rounded-full w-2/3"
-            style={{ backgroundColor: theme.text, opacity: 0.15 }}
-          />
-        </div>
-        {/* Surface preview */}
-        <div
-          className="absolute bottom-2 left-3 right-3 h-[14px] rounded-md"
-          style={{
-            backgroundColor: theme.surface,
-            border: `1px solid ${theme.border}`,
-          }}
-        />
-        {/* Text color dot */}
-        <div
-          className="absolute top-[14px] right-3 w-[6px] h-[6px] rounded-full"
-          style={{ backgroundColor: theme.text, opacity: 0.8 }}
-        />
-        {/* Selected checkmark */}
-        {isSelected && (
-          <motion.div
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            className="absolute inset-0 flex items-center justify-center"
-            style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
-          >
-            <div
-              className="w-7 h-7 rounded-full flex items-center justify-center"
-              style={{ backgroundColor: theme.accent }}
-            >
-              <Check className="w-4 h-4" style={{ color: theme.bg }} />
-            </div>
-          </motion.div>
-        )}
-      </div>
-      {/* Theme name */}
-      <span
-        className="text-xs font-medium transition-colors duration-200"
-        style={{ color: isSelected ? "var(--mc-text)" : "var(--mc-muted)" }}
-      >
-        {theme.label}
-      </span>
-    </motion.button>
-  );
-}
-
-export default function SettingsPage() {
-  const [settings, setSettings] = useState<SettingsData | null>(null);
-  const [authTab, setAuthTab] = useState<"subscription" | "apikey">("subscription");
   const [apiKey, setApiKey] = useState("");
-  const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [connectingOAuth, setConnectingOAuth] = useState(false);
-  const { currentTheme, setTheme, themes } = useTheme();
+  const [deleting, setDeleting] = useState(false);
 
+  // OAuth connect state
+  const [connecting, setConnecting] = useState(false);
+  const [disconnectingOAuth, setDisconnectingOAuth] = useState(false);
+
+  // Anthropic code paste (OAuth redirects to console.anthropic.com, user must paste code)
+  const [awaitingCode, setAwaitingCode] = useState(false);
+  const [authCode, setAuthCode] = useState("");
+  const [submittingCode, setSubmittingCode] = useState(false);
+
+  // Manual paste fallback
+  const [showManualPaste, setShowManualPaste] = useState(false);
+  const [subToken, setSubToken] = useState("");
+  const [savingToken, setSavingToken] = useState(false);
+
+  // Auth method toggle: "subscription" or "apikey"
+  // Default to whichever method is currently connected, or "subscription" for providers that support it
+  const [authMethod, setAuthMethod] = useState<"subscription" | "apikey">(
+    keyData && !oauthStatus?.connected ? "apikey" : "subscription"
+  );
+
+  // Polling ref
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const Icon = PROVIDER_ICONS[provider.id];
+
+  const isOAuthConnected = oauthStatus?.connected ?? false;
+  const isApiKeyConnected = !!keyData;
+  const isConnected = isOAuthConnected || isApiKeyConnected;
+
+  // Stop polling on unmount
   useEffect(() => {
-    fetchSettings();
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
   }, []);
 
-  async function fetchSettings() {
-    try {
-      const res = await fetch("/api/settings");
-      if (res.ok) {
+  const startPolling = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch("/api/oauth");
+        if (!res.ok) return;
         const data = await res.json();
-        setSettings(data);
+        if (data.providers?.[provider.id]?.connected) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setConnecting(false);
+          toast.success(`${provider.name} connected!`);
+          onUpdate();
+        }
+      } catch {}
+    }, 2000);
+
+    // Auto-stop after 5 minutes
+    setTimeout(() => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+        setConnecting(false);
+        setShowManualPaste(true);
+        toast.error("Timed out waiting for auth. Use the manual paste option below.");
       }
-    } catch {
-    } finally {
-      setLoading(false);
+    }, 5 * 60 * 1000);
+  }, [provider.id, provider.name, onUpdate]);
+
+  async function handleConnect() {
+    setConnecting(true);
+    try {
+      const res = await fetch("/api/oauth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: provider.id, action: "connect" }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: "Failed to start OAuth" }));
+        throw new Error(data.error || "Failed to start OAuth");
+      }
+      const data = await res.json();
+      if (data.awaitingCode) {
+        // Anthropic OAuth: user must paste the code from the browser
+        setAwaitingCode(true);
+        setConnecting(false);
+      } else {
+        // OpenAI OAuth: automatic callback, poll for completion
+        startPolling();
+      }
+    } catch (err) {
+      setConnecting(false);
+      toast.error(err instanceof Error ? err.message : "Failed to start OAuth");
     }
   }
 
-  async function handleSaveApiKey(e: React.FormEvent) {
-    e.preventDefault();
-    if (!apiKey) return;
-
-    setSaving(true);
-    setSaved(false);
-    setError(null);
-
+  async function handleSubmitAuthCode() {
+    if (!authCode.trim()) return;
+    setSubmittingCode(true);
     try {
-      const res = await fetch("/api/settings", {
+      const res = await fetch("/api/oauth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, provider: "anthropic", authMethod: "api-key" }),
+        body: JSON.stringify({ provider: provider.id, authCode: authCode.trim() }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: "Failed to exchange code" }));
+        throw new Error(data.error || "Failed to exchange code");
+      }
+      toast.success(`${provider.name} connected!`);
+      setAuthCode("");
+      setAwaitingCode(false);
+      onUpdate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to exchange code");
+    } finally {
+      setSubmittingCode(false);
+    }
+  }
 
+  async function handleSaveApiKey() {
+    if (!apiKey) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/provider-keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: provider.id, apiKey }),
+      });
       if (!res.ok) {
         const data = await res.json();
-        setError(data.error || "Failed to save");
-        return;
+        throw new Error(data.error || "Failed to save key");
       }
-
-      setSaved(true);
+      toast.success(`${provider.name} API key saved`);
       setApiKey("");
-      await new Promise(r => setTimeout(r, 300));
-      await fetchSettings();
-      setTimeout(() => setSaved(false), 3000);
+      onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save");
+      toast.error(err instanceof Error ? err.message : "Failed to save key");
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleDisconnect() {
-    setError(null);
+  async function handleDeleteApiKey() {
+    setDeleting(true);
     try {
-      const res = await fetch("/api/settings", {
-        method: "DELETE",
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        setError(data.error || "Failed to disconnect");
-        return;
-      }
-      await new Promise(r => setTimeout(r, 300));
-      await fetchSettings();
+      const res = await fetch(`/api/provider-keys/${provider.id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to remove key");
+      toast.success(`${provider.name} API key removed`);
+      onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to disconnect");
+      toast.error(err instanceof Error ? err.message : "Failed to remove key");
+    } finally {
+      setDeleting(false);
     }
   }
 
-  async function handleConnectSubscription() {
-    setConnectingOAuth(true);
-    setError(null);
-
+  async function handleSaveManualToken() {
+    if (!subToken.trim()) return;
+    setSavingToken(true);
     try {
-      // Check if Claude CLI is installed and authenticated
-      const res = await fetch("/api/settings", {
+      const res = await fetch("/api/oauth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ authMethod: "subscription", provider: "anthropic" }),
+        body: JSON.stringify({ provider: provider.id, token: subToken.trim() }),
       });
-
       if (!res.ok) {
-        const data = await res.json();
-        setError(data.error || "Failed to connect");
-        return;
+        const data = await res.json().catch(() => ({ error: "Failed to save token" }));
+        throw new Error(data.error || "Failed to save token");
       }
-
-      setSaved(true);
-      // Small delay to ensure server has written the file
-      await new Promise(r => setTimeout(r, 300));
-      await fetchSettings();
-      setTimeout(() => setSaved(false), 3000);
+      toast.success(`${provider.name} connected!`);
+      setSubToken("");
+      setShowManualPaste(false);
+      onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to connect");
+      toast.error(err instanceof Error ? err.message : "Failed to save token");
     } finally {
-      setConnectingOAuth(false);
+      setSavingToken(false);
     }
+  }
+
+  async function handleDisconnectOAuth() {
+    setDisconnectingOAuth(true);
+    try {
+      const res = await fetch("/api/oauth", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: provider.id }),
+      });
+      if (!res.ok) throw new Error("Failed to disconnect");
+      toast.success(`${provider.name} disconnected`);
+      onUpdate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to disconnect");
+    } finally {
+      setDisconnectingOAuth(false);
+    }
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: index * 0.06, duration: 0.3 }}
+      className="glass-card p-5"
+    >
+      {/* Header row: icon + name + status */}
+      <div className="flex items-center gap-3 mb-4">
+        <div
+          className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+          style={{
+            backgroundColor: isConnected
+              ? "rgba(52, 211, 153, 0.1)"
+              : "var(--mc-surface)",
+            border: `1px solid ${isConnected ? "rgba(52, 211, 153, 0.2)" : "var(--mc-border)"}`,
+          }}
+        >
+          {Icon && <Icon size={20} style={{ color: isConnected ? "#34d399" : "var(--mc-muted)" }} />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium" style={{ color: "var(--mc-text)" }}>
+              {provider.name}
+            </span>
+            {isConnected && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400">
+                {isOAuthConnected && isApiKeyConnected
+                  ? "Connected"
+                  : isOAuthConnected
+                  ? "Subscription"
+                  : "API Key"}
+              </span>
+            )}
+          </div>
+          <span className="text-xs mt-0.5 block" style={{ color: "var(--mc-muted)" }}>
+            {provider.description}
+          </span>
+        </div>
+      </div>
+
+      {/* Auth method toggle (for providers with subscription support) */}
+      {provider.supportsSubscription && (
+        <div
+          className="flex rounded-lg p-0.5 mb-4"
+          style={{ backgroundColor: "var(--mc-surface)", border: "1px solid var(--mc-border)" }}
+        >
+          <button
+            onClick={() => setAuthMethod("subscription")}
+            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-150"
+            style={{
+              backgroundColor: authMethod === "subscription" ? "var(--mc-accent)" : "transparent",
+              color: authMethod === "subscription" ? "white" : "var(--mc-muted)",
+            }}
+          >
+            <LogIn className="w-3 h-3" />
+            Subscription
+            {isOAuthConnected && authMethod !== "subscription" && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+            )}
+          </button>
+          <button
+            onClick={() => setAuthMethod("apikey")}
+            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-150"
+            style={{
+              backgroundColor: authMethod === "apikey" ? "var(--mc-accent)" : "transparent",
+              color: authMethod === "apikey" ? "white" : "var(--mc-muted)",
+            }}
+          >
+            <Key className="w-3 h-3" />
+            API Key
+            {isApiKeyConnected && authMethod !== "apikey" && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* Subscription / OAuth section */}
+      {provider.supportsSubscription && authMethod === "subscription" && (
+        <>
+          {isOAuthConnected ? (
+            /* Connected state */
+            <div
+              className="flex items-center gap-3 p-3 rounded-xl"
+              style={{ backgroundColor: "var(--mc-surface)", border: "1px solid var(--mc-border)" }}
+            >
+              <LogIn className="w-4 h-4 flex-shrink-0" style={{ color: "var(--mc-muted)" }} />
+              <div className="flex-1 min-w-0">
+                <span className="text-xs font-medium" style={{ color: "var(--mc-text)" }}>
+                  {provider.subscriptionLabel}
+                </span>
+                <span className="text-[10px] block mt-0.5" style={{ color: "var(--mc-muted)" }}>
+                  {provider.subscriptionConnectedLabel}
+                </span>
+              </div>
+              <Button
+                onClick={handleDisconnectOAuth}
+                disabled={disconnectingOAuth}
+                variant="ghost"
+                size="sm"
+                className="rounded-lg h-8 text-[11px] text-red-400/60 hover:text-red-400 border border-red-500/10 gap-1.5"
+              >
+                {disconnectingOAuth ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3 h-3" />
+                )}
+                Disconnect
+              </Button>
+            </div>
+          ) : awaitingCode ? (
+            /* Anthropic: paste the auth code from the browser */
+            <div
+              className="p-3 rounded-xl space-y-2.5"
+              style={{ backgroundColor: "var(--mc-surface)", border: "1px solid var(--mc-border)" }}
+            >
+              <div className="flex items-center gap-2">
+                <LogIn className="w-3.5 h-3.5" style={{ color: "var(--mc-accent)" }} />
+                <span className="text-xs font-medium" style={{ color: "var(--mc-text)" }}>
+                  Paste Authorization Code
+                </span>
+              </div>
+              <p className="text-[10px] leading-relaxed" style={{ color: "var(--mc-muted)" }}>
+                Sign in on the page that opened, then copy the authorization code and paste it below.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  type="text"
+                  placeholder="code#state"
+                  value={authCode}
+                  onChange={(e) => setAuthCode(e.target.value)}
+                  className="rounded-lg h-9 text-xs font-mono flex-1"
+                  style={{
+                    backgroundColor: "var(--mc-bg)",
+                    borderColor: "var(--mc-border)",
+                    color: "var(--mc-text)",
+                  }}
+                  autoFocus
+                  onKeyDown={(e) => e.key === "Enter" && handleSubmitAuthCode()}
+                />
+                <Button
+                  onClick={handleSubmitAuthCode}
+                  disabled={!authCode.trim() || submittingCode}
+                  size="sm"
+                  className="rounded-lg h-9 text-xs text-white gap-1.5"
+                  style={{ backgroundColor: "var(--mc-accent)" }}
+                >
+                  {submittingCode ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle className="w-3 h-3" />}
+                  Connect
+                </Button>
+              </div>
+            </div>
+          ) : connecting ? (
+            /* Waiting for OAuth callback (OpenAI) */
+            <div
+              className="p-3 rounded-xl space-y-2"
+              style={{ backgroundColor: "var(--mc-surface)", border: "1px solid var(--mc-border)" }}
+            >
+              <div className="flex items-center gap-2">
+                <div
+                  className="w-4 h-4 border-2 rounded-full animate-spin"
+                  style={{ borderColor: "var(--mc-border)", borderTopColor: "var(--mc-accent)" }}
+                />
+                <span className="text-xs font-medium" style={{ color: "var(--mc-text)" }}>
+                  Waiting for authorization...
+                </span>
+              </div>
+              <p className="text-[10px] leading-relaxed" style={{ color: "var(--mc-muted)" }}>
+                Complete the sign-in in the browser window that opened. This page will update automatically.
+              </p>
+              <button
+                onClick={() => {
+                  if (pollRef.current) clearInterval(pollRef.current);
+                  pollRef.current = null;
+                  setConnecting(false);
+                  setShowManualPaste(true);
+                }}
+                className="text-[10px] underline underline-offset-2"
+                style={{ color: "var(--mc-muted)" }}
+              >
+                Having trouble? Paste token manually
+              </button>
+            </div>
+          ) : showManualPaste ? (
+            /* Manual token paste fallback */
+            <div
+              className="p-3 rounded-xl space-y-2.5"
+              style={{ backgroundColor: "var(--mc-surface)", border: "1px solid var(--mc-border)" }}
+            >
+              <div className="flex items-center gap-2">
+                <Terminal className="w-3.5 h-3.5" style={{ color: "var(--mc-accent)" }} />
+                <span className="text-xs font-medium" style={{ color: "var(--mc-text)" }}>
+                  Paste Setup Token
+                </span>
+              </div>
+              <p className="text-[10px] leading-relaxed" style={{ color: "var(--mc-muted)" }}>
+                {provider.id === "openai"
+                  ? "Paste your OpenAI API key or OAuth token below."
+                  : <>Run{" "}
+                    <code
+                      className="px-1.5 py-0.5 rounded text-[10px] font-mono"
+                      style={{ backgroundColor: "var(--mc-bg)", color: "var(--mc-accent)" }}
+                    >
+                      openclaw models auth setup-token
+                    </code>
+                    {" "}in your terminal, then paste the token below.</>}
+              </p>
+              <div className="flex gap-2">
+                <PasswordInput
+                  value={subToken}
+                  onChange={setSubToken}
+                  placeholder={provider.tokenPlaceholder}
+                  className="rounded-lg h-9 text-xs font-mono"
+                  style={{
+                    backgroundColor: "var(--mc-bg)",
+                    borderColor: "var(--mc-border)",
+                    color: "var(--mc-text)",
+                  }}
+                  autoFocus
+                  onKeyDown={(e) => e.key === "Enter" && handleSaveManualToken()}
+                />
+                <Button
+                  onClick={handleSaveManualToken}
+                  disabled={!subToken.trim() || savingToken}
+                  size="sm"
+                  className="rounded-lg h-9 text-xs text-white gap-1.5"
+                  style={{ backgroundColor: "var(--mc-accent)" }}
+                >
+                  {savingToken ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle className="w-3 h-3" />}
+                  Save
+                </Button>
+              </div>
+              <button
+                onClick={() => { setShowManualPaste(false); setSubToken(""); }}
+                className="text-[10px]"
+                style={{ color: "var(--mc-muted)" }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            /* Connect button */
+            <div
+              className="flex items-center gap-3 p-3 rounded-xl"
+              style={{ backgroundColor: "var(--mc-surface)", border: "1px solid var(--mc-border)" }}
+            >
+              <LogIn className="w-4 h-4 flex-shrink-0" style={{ color: "var(--mc-muted)" }} />
+              <div className="flex-1 min-w-0">
+                <span className="text-xs font-medium" style={{ color: "var(--mc-text)" }}>
+                  {provider.subscriptionLabel}
+                </span>
+                <span className="text-[10px] block mt-0.5" style={{ color: "var(--mc-muted)" }}>
+                  {provider.connectLabel}
+                </span>
+              </div>
+              <Button
+                onClick={handleConnect}
+                size="sm"
+                className="rounded-lg h-8 text-[11px] text-white gap-1.5"
+                style={{ backgroundColor: "var(--mc-accent)" }}
+              >
+                <ExternalLink className="w-3 h-3" />
+                Connect
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* API Key section — shown when: no subscription support, or subscription-capable but apikey tab selected */}
+      {(!provider.supportsSubscription || authMethod === "apikey") && (
+        <>
+          {isApiKeyConnected ? (
+            <div className="flex items-center gap-3">
+              <div
+                className="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-mono"
+                style={{ backgroundColor: "var(--mc-surface)", border: "1px solid var(--mc-border)", color: "var(--mc-muted)" }}
+              >
+                <Key className="w-3.5 h-3.5 flex-shrink-0" style={{ color: "var(--mc-muted)" }} />
+                <span>...{keyData!.keyHint}</span>
+                {keyData!.validated && (
+                  <CheckCircle className="w-3 h-3 text-emerald-400 ml-1" />
+                )}
+              </div>
+              <Button
+                onClick={handleDeleteApiKey}
+                disabled={deleting}
+                variant="ghost"
+                size="sm"
+                className="rounded-lg h-9 text-xs text-red-400/60 hover:text-red-400 border border-red-500/10 gap-1.5"
+              >
+                {deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                Remove
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <PasswordInput
+                  value={apiKey}
+                  onChange={setApiKey}
+                  placeholder={provider.placeholder}
+                  className="rounded-xl h-9 text-xs font-mono"
+                  style={{
+                    backgroundColor: "var(--mc-bg)",
+                    borderColor: "var(--mc-border)",
+                    color: "var(--mc-text)",
+                  }}
+                />
+                <Button
+                  onClick={handleSaveApiKey}
+                  disabled={!apiKey || saving}
+                  size="sm"
+                  className="rounded-xl h-9 text-xs text-white gap-1.5"
+                  style={{ backgroundColor: "var(--mc-accent)" }}
+                >
+                  {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Key className="w-3 h-3" />}
+                  Save Key
+                </Button>
+              </div>
+              <p className="text-[10px]" style={{ color: "var(--mc-muted)", opacity: 0.5 }}>
+                Get your API key from{" "}
+                <a
+                  href={provider.docsUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline underline-offset-2"
+                  style={{ color: "var(--mc-accent)" }}
+                >
+                  {provider.name} console
+                </a>
+              </p>
+            </div>
+          )}
+        </>
+      )}
+    </motion.div>
+  );
+}
+
+// ── Settings Page ───────────────────────────────────────────
+
+export default function SettingsPage() {
+  const [loading, setLoading] = useState(true);
+  const [providerKeys, setProviderKeys] = useState<ProviderKeyData[]>([]);
+  const [oauthStatus, setOauthStatus] = useState<OAuthStatus | null>(null);
+
+  const {
+    currentTheme, setTheme, themes,
+    currentFont, setFont, fontPresets,
+    currentStyle, setStyle, stylePresets,
+  } = useTheme();
+
+  useEffect(() => {
+    fetchAll();
+    fontPresets.forEach((font) => {
+      if (font.googleFontsUrl) {
+        const existing = document.querySelector(`link[href="${font.googleFontsUrl}"]`);
+        if (!existing) {
+          const link = document.createElement("link");
+          link.rel = "stylesheet";
+          link.href = font.googleFontsUrl;
+          document.head.appendChild(link);
+        }
+      }
+    });
+  }, []);
+
+  async function fetchAll() {
+    await Promise.all([fetchProviderKeys(), fetchOAuthStatus()]);
+    setLoading(false);
+  }
+
+  async function fetchProviderKeys() {
+    try {
+      const res = await fetch("/api/provider-keys");
+      if (res.ok) {
+        const data = await res.json();
+        setProviderKeys(data.keys || []);
+      }
+    } catch {}
+  }
+
+  async function fetchOAuthStatus() {
+    try {
+      const res = await fetch("/api/oauth");
+      if (res.ok) {
+        const data = await res.json();
+        setOauthStatus(data);
+      }
+    } catch {}
+  }
+
+  function handleProviderUpdate() {
+    fetchProviderKeys();
+    fetchOAuthStatus();
   }
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
-        <div className="w-6 h-6 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
+        <div className="w-6 h-6 border-2 rounded-full animate-spin" style={{ borderColor: "var(--mc-border)", borderTopColor: "var(--mc-muted)" }} />
       </div>
     );
   }
 
   return (
-    <div className="p-8 max-w-2xl mx-auto">
+    <div className="p-4 pt-14 sm:p-6 md:p-8 max-w-3xl mx-auto">
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -247,339 +680,63 @@ export default function SettingsPage() {
           Settings
         </h1>
         <p className="text-sm mt-1" style={{ color: "var(--mc-muted)" }}>
-          Configure your AI provider credentials
+          Configure your AI providers and appearance
         </p>
       </motion.div>
 
-            {/* ──────── Authentication ──────── */}
+      {/* ──────── AI Providers ──────── */}
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.03 }}
-        className="mb-4"
+        className="mb-8"
       >
         <div className="flex items-center gap-2 mb-1">
-          <Shield className="w-5 h-5" style={{ color: "var(--mc-accent)" }} />
-          <h2 className="text-lg font-semibold tracking-tight">Authentication</h2>
+          <Server className="w-5 h-5" style={{ color: "var(--mc-accent)" }} />
+          <h2 className="text-lg font-semibold tracking-tight">AI Providers</h2>
         </div>
-        <p className="text-sm mb-0" style={{ color: "var(--mc-muted)" }}>
-          Connect your AI provider to deploy agents
+        <p className="text-sm mb-5" style={{ color: "var(--mc-muted)" }}>
+          Connect your AI providers to deploy agents and access models
         </p>
-      </motion.div>
 
-      {/* ──────── Connection Status ──────── */}
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.05 }}
-        className="glass-card p-5 mb-6"
-      >
-        <div className="flex items-center gap-3">
-          {settings?.hasApiKey ? (
-            <>
-              <div className="w-9 h-9 rounded-xl bg-emerald-500/10 flex items-center justify-center">
-                <CheckCircle className="w-5 h-5 text-emerald-400" />
-              </div>
-              <div>
-                <h3 className="text-sm font-medium">Connected</h3>
-                <p className="text-xs mt-0.5" style={{ color: "var(--mc-muted)" }}>
-                  {settings.authMethod === "subscription" ? (
-                    <>Claude subscription connected</>
-                  ) : (
-                    <>API key ending in{" "}
-                    <span className="font-mono" style={{ opacity: 0.6 }}>
-                      {settings.keyHint}
-                    </span></>
-                  )}
-                  {settings.configuredAt && (
-                    <>
-                      {" "}&middot; configured{" "}
-                      {new Date(settings.configuredAt).toLocaleDateString()}
-                    </>
-                  )}
-                </p>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="w-9 h-9 rounded-xl bg-amber-500/10 flex items-center justify-center">
-                <AlertCircle className="w-5 h-5 text-amber-400" />
-              </div>
-              <div>
-                <h3 className="text-sm font-medium">Not Connected</h3>
-                <p className="text-xs mt-0.5" style={{ color: "var(--mc-muted)" }}>
-                  Connect your Claude subscription or add an API key to enable deployments
-                </p>
-              </div>
-            </>
-          )}
+        <div className="space-y-3">
+          {AI_PROVIDERS.map((provider, i) => (
+            <ProviderCard
+              key={provider.id}
+              provider={provider}
+              keyData={providerKeys.find((k) => k.provider === provider.id) || null}
+              oauthStatus={oauthStatus?.providers?.[provider.id] || null}
+              onUpdate={handleProviderUpdate}
+              index={i}
+            />
+          ))}
         </div>
       </motion.div>
 
-      {/* Auth Method Tabs */}
+      {/* ──────── Appearance ──────── */}
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <div className="glass-card overflow-hidden mb-6">
-          {/* Tab headers */}
-          <div className="flex" style={{ borderBottom: "1px solid var(--mc-border)" }}>
-            <button
-              onClick={() => setAuthTab("subscription")}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-3.5 text-sm font-medium transition-all"
-              style={{
-                color: authTab === "subscription" ? "var(--mc-text)" : "var(--mc-muted)",
-                backgroundColor: authTab === "subscription" ? "var(--mc-surface)" : "transparent",
-                borderBottom: authTab === "subscription" ? `2px solid var(--mc-accent)` : "2px solid transparent",
-              }}
-            >
-              <User className="w-4 h-4" />
-              Claude Subscription
-            </button>
-            <button
-              onClick={() => setAuthTab("apikey")}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-3.5 text-sm font-medium transition-all"
-              style={{
-                color: authTab === "apikey" ? "var(--mc-text)" : "var(--mc-muted)",
-                backgroundColor: authTab === "apikey" ? "var(--mc-surface)" : "transparent",
-                borderBottom: authTab === "apikey" ? `2px solid var(--mc-accent)` : "2px solid transparent",
-              }}
-            >
-              <Key className="w-4 h-4" />
-              API Key
-            </button>
-          </div>
-
-          {/* Tab content */}
-          <div className="p-6">
-            <AnimatePresence mode="wait">
-              {authTab === "subscription" ? (
-                <motion.div
-                  key="subscription"
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 10 }}
-                  transition={{ duration: 0.15 }}
-                  className="space-y-5"
-                >
-                  <div
-                    className="flex items-start gap-3 p-4 rounded-xl"
-                    style={{
-                      backgroundColor: `color-mix(in srgb, var(--mc-accent) 8%, transparent)`,
-                      border: `1px solid color-mix(in srgb, var(--mc-accent) 15%, transparent)`,
-                    }}
-                  >
-                    <LogIn className="w-5 h-5 mt-0.5 shrink-0" style={{ color: "var(--mc-accent)" }} />
-                    <div>
-                      <h3 className="text-sm font-medium" style={{ color: "var(--mc-accent)" }}>Use your existing Claude subscription</h3>
-                      <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--mc-muted)" }}>
-                        If you have a Claude Pro, Max, or Team subscription, you can authorize Mission Control
-                        to use your subscription directly. No API key needed — we&apos;ll connect through your
-                        existing Claude account.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <h4 className="text-xs font-medium uppercase tracking-wider" style={{ color: "var(--mc-muted)" }}>How it works</h4>
-                    <div className="space-y-2">
-                      {[
-                        "Click connect below to authorize access",
-                        "Sign in with your Anthropic account",
-                        "Mission Control gets delegated access to your subscription",
-                        "Your usage counts toward your existing plan limits",
-                      ].map((step, i) => (
-                        <div key={i} className="flex items-start gap-3">
-                          <div className="w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5" style={{ backgroundColor: "var(--mc-surface)" }}>
-                            <span className="text-[10px] font-medium" style={{ color: "var(--mc-muted)" }}>{i + 1}</span>
-                          </div>
-                          <span className="text-sm" style={{ color: "var(--mc-muted)" }}>{step}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {settings?.authMethod === "subscription" ? (
-                    <div className="flex gap-3">
-                      <div
-                        className="flex-1 flex items-center justify-center gap-2 rounded-xl h-11 text-sm font-medium border"
-                        style={{ borderColor: "var(--mc-border)", color: "var(--mc-muted)" }}
-                      >
-                        <CheckCircle className="w-4 h-4 text-emerald-400" />
-                        Subscription Connected
-                      </div>
-                      <Button
-                        onClick={handleDisconnect}
-                        variant="ghost"
-                        className="rounded-xl h-11 text-sm font-medium gap-2 text-red-400 hover:text-red-300 border"
-                        style={{ borderColor: "rgba(239,68,68,0.2)" }}
-                      >
-                        Disconnect
-                      </Button>
-                    </div>
-                  ) : (
-                    <>
-                      <Button
-                        onClick={handleConnectSubscription}
-                        disabled={connectingOAuth}
-                        className="w-full text-white rounded-xl h-11 text-sm font-medium gap-2"
-                        style={{ backgroundColor: "var(--mc-accent)" }}
-                      >
-                        {connectingOAuth ? (
-                          <>
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            Connecting...
-                          </>
-                        ) : (
-                          <>
-                            <ExternalLink className="w-4 h-4" />
-                            Connect Claude Subscription
-                          </>
-                        )}
-                      </Button>
-                      <p className="text-xs text-center" style={{ color: "var(--mc-muted)", opacity: 0.5 }}>
-                        Requires Claude Pro ($20/mo), Max ($100/mo), or Team plan
-                      </p>
-                    </>
-                  )}
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="apikey"
-                  initial={{ opacity: 0, x: 10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -10 }}
-                  transition={{ duration: 0.15 }}
-                >
-                  <form onSubmit={handleSaveApiKey} className="space-y-5">
-                    <div
-                      className="flex items-start gap-3 p-4 rounded-xl"
-                      style={{
-                        backgroundColor: "var(--mc-surface)",
-                        border: "1px solid var(--mc-border)",
-                      }}
-                    >
-                      <Shield className="w-5 h-5 mt-0.5 shrink-0" style={{ color: "var(--mc-muted)" }} />
-                      <div>
-                        <h3 className="text-sm font-medium" style={{ color: "var(--mc-muted)" }}>Use an API key</h3>
-                        <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--mc-muted)", opacity: 0.7 }}>
-                          Paste your Anthropic API key from{" "}
-                          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
-                            className="underline underline-offset-2" style={{ color: "var(--mc-accent)" }}>
-                            console.anthropic.com
-                          </a>.
-                          Usage is billed to your API account separately from any subscription.
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="apiKey" className="text-xs uppercase tracking-wider" style={{ color: "var(--mc-muted)" }}>
-                        API Key
-                      </Label>
-                      <div className="relative">
-                        <Input
-                          id="apiKey"
-                          type={showKey ? "text" : "password"}
-                          placeholder="sk-ant-..."
-                          value={apiKey}
-                          onChange={(e) => setApiKey(e.target.value)}
-                          className="rounded-xl h-11 text-sm font-mono pr-10"
-                          style={{
-                            backgroundColor: "var(--mc-surface)",
-                            borderColor: "var(--mc-border)",
-                            color: "var(--mc-text)",
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowKey(!showKey)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 transition-colors"
-                          style={{ color: "var(--mc-muted)" }}
-                        >
-                          {showKey ? (
-                            <EyeOff className="w-4 h-4" />
-                          ) : (
-                            <Eye className="w-4 h-4" />
-                          )}
-                        </button>
-                      </div>
-                      <p className="text-xs" style={{ color: "var(--mc-muted)", opacity: 0.6 }}>
-                        Stored locally in ~/.mission-control/auth.json — never sent to our servers
-                      </p>
-                    </div>
-
-                    <Button
-                      type="submit"
-                      disabled={!apiKey || saving}
-                      className="w-full rounded-xl h-11 text-sm font-medium gap-2"
-                    >
-                      {saving ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          Saving...
-                        </>
-                      ) : (
-                        <>
-                          <Key className="w-4 h-4" />
-                          {settings?.hasApiKey ? "Update API Key" : "Save API Key"}
-                        </>
-                      )}
-                    </Button>
-                  </form>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Shared success/error messages */}
-            <AnimatePresence>
-              {saved && (
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="flex items-center gap-2 p-3 mt-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20"
-                >
-                  <CheckCircle className="w-4 h-4 text-emerald-400" />
-                  <span className="text-emerald-400 text-sm font-medium">
-                    Connected successfully
-                  </span>
-                </motion.div>
-              )}
-              {error && (
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="flex items-center gap-2 p-3 mt-4 rounded-xl bg-red-500/10 border border-red-500/20"
-                >
-                  <AlertCircle className="w-4 h-4 text-red-400" />
-                  <span className="text-red-400 text-sm">{error}</span>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </div>
-      </motion.div>
-
-      {/* ──────── Appearance / Theme Section ──────── */}
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.12 }}
-        className="mb-8 mt-2"
+        transition={{ delay: 0.15 }}
+        className="mb-8"
       >
         <div className="flex items-center gap-2 mb-1">
           <Palette className="w-5 h-5" style={{ color: "var(--mc-accent)" }} />
           <h2 className="text-lg font-semibold tracking-tight">Appearance</h2>
         </div>
         <p className="text-sm mb-5" style={{ color: "var(--mc-muted)" }}>
-          Choose your theme
+          Customize colors, fonts, and UI style
         </p>
 
-        <div className="glass-card p-5">
-          <div className="grid grid-cols-5 gap-4 justify-items-center">
+        {/* Colors */}
+        <div className="glass-card p-5 mb-4">
+          <div className="flex items-center gap-2 mb-4">
+            <Palette className="w-4 h-4" style={{ color: "var(--mc-muted)" }} />
+            <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: "var(--mc-muted)" }}>
+              Colors
+            </h3>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
             {themes.map((theme, i) => (
               <ThemeCard
                 key={theme.name}
@@ -591,10 +748,49 @@ export default function SettingsPage() {
             ))}
           </div>
         </div>
-      </motion.div>
 
-      
-      
+        {/* Fonts */}
+        <div className="glass-card p-5 mb-4">
+          <div className="flex items-center gap-2 mb-4">
+            <Type className="w-4 h-4" style={{ color: "var(--mc-muted)" }} />
+            <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: "var(--mc-muted)" }}>
+              Font
+            </h3>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+            {fontPresets.map((font, i) => (
+              <FontCard
+                key={font.name}
+                font={font}
+                isSelected={currentFont.name === font.name}
+                onClick={() => setFont(font)}
+                index={i}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Style */}
+        <div className="glass-card p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <Layout className="w-4 h-4" style={{ color: "var(--mc-muted)" }} />
+            <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: "var(--mc-muted)" }}>
+              Style
+            </h3>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+            {stylePresets.map((style, i) => (
+              <StyleCard
+                key={style.name}
+                style={style}
+                isSelected={currentStyle.name === style.name}
+                onClick={() => setStyle(style)}
+                index={i}
+              />
+            ))}
+          </div>
+        </div>
+      </motion.div>
     </div>
   );
 }

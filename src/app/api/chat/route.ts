@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getInstance } from "@/lib/instances";
+import { getGateway } from "@/lib/gateway";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { instanceName, messages, stream = true } = body;
+    const { agentId, messages, stream = true } = body;
 
-    if (!instanceName) {
+    if (!agentId) {
       return NextResponse.json(
-        { error: "instanceName is required" },
+        { error: "agentId is required" },
         { status: 400 }
       );
     }
@@ -20,28 +20,33 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const inst = getInstance(instanceName);
-    if (!inst.token) {
+    const gw = await getGateway();
+    if (!gw.token) {
       return NextResponse.json(
-        { error: `Instance "${instanceName}" has no auth token` },
+        { error: "Gateway has no auth token configured" },
         { status: 400 }
       );
     }
 
-    const url = `http://127.0.0.1:${inst.port}/v1/chat/completions`;
+    const url = `http://127.0.0.1:${gw.port}/v1/chat/completions`;
+
+    // Use a longer timeout for streaming (agent tasks can run for minutes).
+    // For non-streaming, 2 minutes is enough for the initial response.
+    const timeout = stream ? 600000 : 120000;
 
     const openclawRes = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${inst.token}`,
+        Authorization: `Bearer ${gw.token}`,
       },
       body: JSON.stringify({
-        model: "openclaw:main",
+        model: `openclaw:${agentId}`,
         messages,
         stream,
+        user: `mc-${agentId}`,
       }),
-      signal: AbortSignal.timeout(120000),
+      signal: AbortSignal.timeout(timeout),
     });
 
     if (!openclawRes.ok) {
@@ -52,8 +57,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (stream && openclawRes.body) {
-      // Forward the SSE stream to the client
+    const contentType = openclawRes.headers.get("content-type") || "";
+    const isSSE = contentType.includes("text/event-stream");
+
+    if (stream && isSSE && openclawRes.body) {
       return new Response(openclawRes.body, {
         headers: {
           "Content-Type": "text/event-stream",
@@ -63,11 +70,26 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Non-streaming response
+    // Non-streaming response — return as JSON
     const data = await openclawRes.json();
     return NextResponse.json(data);
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Chat request failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const raw = err instanceof Error ? err.message : "Chat request failed";
+    // Translate low-level errors to user-friendly messages
+    const isNetwork =
+      raw.includes("fetch failed") ||
+      raw.includes("ECONNREFUSED") ||
+      raw.includes("network") ||
+      raw.includes("ECONNRESET") ||
+      raw.includes("socket hang up");
+    const isTimeout = raw.includes("TimeoutError") || raw.includes("timed out");
+
+    const message = isNetwork
+      ? "Could not reach the gateway. It may be restarting — try again in a moment."
+      : isTimeout
+      ? "The request timed out. The agent may still be processing — try again shortly."
+      : raw;
+
+    return NextResponse.json({ error: message }, { status: isNetwork ? 502 : 500 });
   }
 }

@@ -17,9 +17,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif;
-  --font-mono: var(--font-geist-mono), "Geist Mono", "SF Mono", "Fira Code",
-    monospace;
+  --font-sans: var(--mc-font-body);
+  --font-mono: var(--mc-font-mono);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -61,7 +60,7 @@
 :root {
   --radius: 0.625rem;
 
-  /* Mission Control theme variables */
+  /* Clawboard theme variables */
   --mc-bg: #09090b;
   --mc-text: #fafafa;
   --mc-accent: #6366f1;
@@ -71,6 +70,17 @@
   --mc-border: rgba(255, 255, 255, 0.06);
   --mc-muted: #71717a;
   --mc-sidebar: #0a0a0c;
+
+  /* Font variables */
+  --mc-font-body: "Inter", system-ui, -apple-system, sans-serif;
+  --mc-font-heading: "Inter", system-ui, -apple-system, sans-serif;
+  --mc-font-mono: "Geist Mono", "SF Mono", "Fira Code", monospace;
+
+  /* Style variables */
+  --mc-radius: 16px;
+  --mc-glass-blur: 24px;
+  --mc-surface-alpha: 0.03;
+  --mc-border-alpha: 0.06;
 
   /* shadcn variables derived from theme */
   --background: var(--mc-bg);
@@ -132,18 +142,18 @@ html *:not([class*="animate-"]) {
 /* Glassmorphism card — uses theme variables */
 .glass-card {
   background: var(--mc-surface);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(var(--mc-glass-blur));
+  -webkit-backdrop-filter: blur(var(--mc-glass-blur));
   border: 1px solid var(--mc-border);
-  border-radius: 16px;
+  border-radius: var(--mc-radius);
 }
 
 .glass-card-hover {
   background: var(--mc-surface);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(var(--mc-glass-blur));
+  -webkit-backdrop-filter: blur(var(--mc-glass-blur));
   border: 1px solid var(--mc-border);
-  border-radius: 16px;
+  border-radius: var(--mc-radius);
   transition: all 0.2s ease;
 }
 
@@ -188,6 +198,41 @@ html *:not([class*="animate-"]) {
   }
 }
 
+/* Typing dots animation */
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.typing-dots .dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.3;
+  animation: typing-dot 1.4s infinite;
+}
+
+.typing-dots .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dots .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typing-dot {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
 /* Terminal styles */
 .terminal {
   background: rgba(0, 0, 0, 0.4);
@@ -198,6 +243,22 @@ html *:not([class*="animate-"]) {
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
+}
+
+/* Deploy orbital rings */
+.orbit-ring-outer {
+  animation: orbit-spin 3s linear infinite;
+}
+.orbit-ring-middle {
+  animation: orbit-spin 2s linear infinite reverse;
+}
+.orbit-ring-inner {
+  animation: orbit-spin 1.5s linear infinite;
+}
+
+@keyframes orbit-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Custom scrollbar */
@@ -211,17 +272,48 @@ html *:not([class*="animate-"]) {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--mc-border);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--mc-muted);
 }
 
-/* Serif font for headings */
+/* Heading font */
 .font-heading {
-  --font-serif: var(--font-lato), "Lato", -apple-system, sans-serif;
+  font-family: var(--mc-font-heading);
+}
+
+/* Spacing presets */
+.mc-compact {
+  --mc-spacing: 0.8;
+}
+.mc-comfortable {
+  --mc-spacing: 1;
+}
+.mc-spacious {
+  --mc-spacing: 1.2;
+}
+
+/* Apply spacing to common padding areas */
+.mc-compact .glass-card { padding: calc(1rem * 0.8); }
+.mc-spacious .glass-card { padding: calc(1rem * 1.2); }
+
+/* Workspace file tree — responsive */
+.workspace-tree {
+  width: 100%;
+  max-height: 200px;
+  border-bottom: 1px solid var(--mc-border);
+  border-right: none;
+}
+@media (min-width: 768px) {
+  .workspace-tree {
+    width: 260px;
+    max-height: none;
+    border-bottom: none;
+    border-right: 1px solid var(--mc-border);
+  }
 }
 
 /* Clickable elements should show pointer cursor */
@@ -230,4 +322,146 @@ summary, label[for], select, input[type="checkbox"], input[type="radio"],
 [tabindex]:not([tabindex="-1"]) {
   cursor: pointer;
 }
-@import "@xterm/xterm/css/xterm.css";
+
+/* ── Markdown prose styles ── */
+.mc-prose {
+  line-height: 1.7;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.mc-prose h1, .mc-prose h2, .mc-prose h3,
+.mc-prose h4, .mc-prose h5, .mc-prose h6 {
+  color: var(--mc-text);
+  font-weight: 600;
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  line-height: 1.3;
+}
+
+.mc-prose h1 { font-size: 1.5em; }
+.mc-prose h2 { font-size: 1.25em; }
+.mc-prose h3 { font-size: 1.1em; }
+
+.mc-prose p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.mc-prose ul, .mc-prose ol {
+  padding-left: 1.5em;
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.mc-prose ul { list-style-type: disc; }
+.mc-prose ol { list-style-type: decimal; }
+
+.mc-prose li {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.mc-prose li > ul, .mc-prose li > ol {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.mc-prose ul:has(> li > input[type="checkbox"]) {
+  list-style: none;
+  padding-left: 0.5em;
+}
+
+.mc-prose li > input[type="checkbox"] {
+  margin-right: 0.5em;
+  accent-color: var(--mc-accent);
+}
+
+.mc-prose blockquote {
+  border-left: 3px solid var(--mc-accent);
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: var(--mc-muted);
+  font-style: italic;
+}
+
+.mc-prose hr {
+  border: none;
+  border-top: 1px solid var(--mc-border);
+  margin: 1em 0;
+}
+
+.mc-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 0.875em;
+}
+
+.mc-prose th, .mc-prose td {
+  border: 1px solid var(--mc-border);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+
+.mc-prose th {
+  background: var(--mc-surface);
+  font-weight: 600;
+  color: var(--mc-text);
+}
+
+.mc-prose td {
+  color: var(--mc-text);
+  opacity: 0.85;
+}
+
+.mc-prose del {
+  color: var(--mc-muted);
+  text-decoration: line-through;
+}
+
+.mc-prose img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 0.5em 0;
+}
+
+.mc-prose strong {
+  font-weight: 600;
+  color: var(--mc-text);
+}
+
+.mc-inline-code {
+  background: var(--mc-surface);
+  border: 1px solid var(--mc-border);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  font-size: 0.85em;
+  font-family: var(--font-mono);
+  color: var(--mc-text);
+}
+
+.mc-prose > :first-child { margin-top: 0; }
+.mc-prose > :last-child { margin-bottom: 0; }
+
+/* Notification scroll-to highlight */
+.notification-highlight {
+  animation: msg-highlight 2.5s ease-out;
+}
+
+@keyframes msg-highlight {
+  0% {
+    background-color: var(--mc-surface);
+    border-radius: 12px;
+    box-shadow: 0 0 0 2px var(--mc-accent);
+  }
+  60% {
+    background-color: var(--mc-surface);
+    border-radius: 12px;
+    box-shadow: 0 0 0 2px var(--mc-accent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 2px transparent;
+  }
+}

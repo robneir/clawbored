@@ -1,40 +1,34 @@
+/**
+ * Gateway deployment — one-time setup flow for creating an OpenClaw instance.
+ *
+ * Deploy steps (runDeployDirect):
+ *   1. Verify/install openclaw CLI
+ *   2. Run `openclaw onboard` with non-interactive flags
+ *   3. Configure openclaw.json (HTTP endpoints, anti-idle settings, workspace path)
+ *   3b. Write auth credentials to auth-profiles.json (pending keys + pre-resolved key)
+ *   4. Install gateway launchd service + inject API keys into plist
+ *   5. Run `openclaw doctor --fix`
+ *   6. Start gateway + verify it's alive
+ *   7. Create default "main" agent
+ *
+ * All state is in-memory (Map<string, Deployment>) — survives for the process
+ * lifetime but is lost on restart. This is acceptable for a one-time setup flow.
+ * SSE listeners provide real-time progress updates to the deploy animation UI.
+ */
+
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getNextPort, registerInstance } from "./instances";
-import { getApiKey, getAuthConfig, isSubscriptionAuth } from "./auth";
+import { getGateway, updateGateway, safeKillPort, profileFlag, stopGateway, cleanupGhostDirs, ensureGatewayConfig } from "./gateway";
+import { createAgent } from "./agents";
+import { getApiKey, isSubscriptionAuth } from "./auth";
+import { getKeyForProvider, readAuthProfiles, writeAuthProfiles, PROVIDER_MAP } from "./provider-keys";
+import { PROVIDER_ENV_MAP } from "./providers";
+import { getPendingKeys, clearPendingKeys, getPendingOAuthTokens, clearPendingOAuthTokens } from "./mc-state";
 import crypto from "node:crypto";
-import Anthropic from "@anthropic-ai/sdk";
 
 const HOME = homedir();
-
-/**
- * Clean up LaunchAgent and port processes from a failed deployment.
- */
-function cleanupFailedDeploy(name: string, port: number) {
-  const plistPatterns = [
-    `ai.openclaw.gateway-${name}.plist`,
-    `ai.openclaw.${name}.plist`,
-    `com.openclaw.gateway-${name}.plist`,
-  ];
-  for (const plistName of plistPatterns) {
-    const plistPath = join(HOME, "Library", "LaunchAgents", plistName);
-    try {
-      execSync(`launchctl bootout gui/$(id -u) "${plistPath}" 2>/dev/null`, { stdio: "pipe" });
-    } catch {}
-    try {
-      if (existsSync(plistPath)) {
-        const { unlinkSync } = require("node:fs");
-        unlinkSync(plistPath);
-      }
-    } catch {}
-  }
-  try {
-    execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null`, { stdio: "pipe" });
-  } catch {}
-}
-
 
 export interface LogEntry {
   ts: number;
@@ -50,550 +44,247 @@ export interface Deployment {
   profileDir: string;
   status: "running" | "complete" | "failed";
   startedAt: string;
-  logs: LogEntry[];
   error: string | null;
   result: Record<string, unknown> | null;
 }
 
-// In-memory deployment store
-const activeDeployments = new Map<string, Deployment>();
+// ── In-memory state ─────────────────────────────────────────────────
+
+/** In-memory deployment records */
+const deployments = new Map<string, Deployment>();
+
+/** In-memory SSE listeners (ephemeral pub/sub) */
 const sseListeners = new Map<string, Array<(entry: LogEntry) => void>>();
 
-export function getDeployment(id: string): Deployment | undefined {
-  return activeDeployments.get(id);
+/** In-memory log buffer */
+const logBuffers = new Map<string, LogEntry[]>();
+
+// ── Public API ──────────────────────────────────────────────────────
+
+export function getDeployment(id: string): Deployment | null {
+  return deployments.get(id) || null;
 }
 
-export function listDeployments() {
-  return [...activeDeployments.entries()].map(([id, d]) => ({
-    id,
-    name: d.name,
-    status: d.status,
-    startedAt: d.startedAt,
-  }));
+export function getDeploymentLogs(id: string): LogEntry[] {
+  return logBuffers.get(id) || [];
 }
 
-function addLog(deployment: Deployment, message: string) {
-  const entry: LogEntry = { ts: Date.now(), message };
-  deployment.logs.push(entry);
-  const listeners = sseListeners.get(deployment.id) || [];
-  for (const listener of listeners) {
-    try {
-      listener(entry);
-    } catch {}
-  }
-}
-
-export function addSSEListener(deployId: string, callback: (entry: LogEntry) => void) {
+/** Replay logs from in-memory buffer, then register for live updates */
+export function addSSEListener(
+  deployId: string,
+  callback: (entry: LogEntry) => void
+): () => void {
   if (!sseListeners.has(deployId)) sseListeners.set(deployId, []);
   sseListeners.get(deployId)!.push(callback);
 
-  // Send existing logs
-  const deployment = activeDeployments.get(deployId);
-  if (deployment) {
-    for (const entry of deployment.logs) {
-      callback(entry);
-    }
+  const buffered = logBuffers.get(deployId) || [];
+  for (const entry of buffered) {
+    callback(entry);
   }
 
   return () => {
     const arr = sseListeners.get(deployId) || [];
-    sseListeners.set(
-      deployId,
-      arr.filter((r) => r !== callback)
-    );
+    sseListeners.set(deployId, arr.filter((r) => r !== callback));
   };
 }
 
-export async function startDeployment({
-  name,
-  displayName,
-  template,
-}: {
-  name: string;
-  displayName?: string;
-  template?: string;
-}) {
-  const authConfig = getAuthConfig();
-  const apiKey = getApiKey();
-  const useSubscription = isSubscriptionAuth();
-  if (!apiKey && !useSubscription) {
-    throw new Error("No authentication configured. Go to Settings to connect your Claude subscription or add an API key.");
+// ── Internal helpers ────────────────────────────────────────────────
+
+function addLog(deployId: string, message: string) {
+  const entry: LogEntry = { ts: Date.now(), message };
+
+  if (!logBuffers.has(deployId)) logBuffers.set(deployId, []);
+  logBuffers.get(deployId)!.push(entry);
+
+  const listeners = sseListeners.get(deployId) || [];
+  for (const listener of listeners) {
+    try { listener(entry); } catch {}
+  }
+}
+
+function updateDeployStatus(
+  id: string,
+  status: "running" | "complete" | "failed",
+  extra?: { error?: string; result?: Record<string, unknown> }
+) {
+  const deploy = deployments.get(id);
+  if (deploy) {
+    deploy.status = status;
+    if (extra?.error !== undefined) deploy.error = extra.error;
+    if (extra?.result !== undefined) deploy.result = extra.result;
+  }
+
+  // Cleanup buffers 30s after terminal state
+  if (status === "complete" || status === "failed") {
+    setTimeout(() => {
+      logBuffers.delete(id);
+      sseListeners.delete(id);
+      deployments.delete(id);
+    }, 60000);
+  }
+}
+
+// ── Gateway Setup ───────────────────────────────────────────────────
+
+/**
+ * One-time gateway setup. Sets up OpenClaw with the specified profile,
+ * configures the gateway, and creates a default "main" agent.
+ */
+export async function setupGateway(options?: {
+  profileName?: string;
+  port?: number;
+}): Promise<{ deployId: string }> {
+  let gwProfileName = options?.profileName || "clawboard";
+  // Never allow "default" — that creates ~/.openclaw which is a ghost directory trap
+  if (gwProfileName === "default") gwProfileName = "clawboard";
+  const gwPort = options?.port || 19100;
+  const profileDir = join(HOME, `.openclaw-${gwProfileName}`);
+
+  // Resolve provider keys from ALL sources BEFORE switching the gateway pointer.
+  // Once we update the gateway singleton to point at the new (empty) profile dir,
+  // getKeyForProvider() will read the new profile and find nothing.
+  // Keys are optional — the gateway can start without them (--auth-choice skip).
+  const apiKey = await getApiKey();
+  const providerKey = await getKeyForProvider("anthropic");
+  const envKey = process.env.ANTHROPIC_API_KEY || null;
+  const resolvedKey = apiKey || providerKey || envKey;
+
+  // Also capture OpenAI key if available
+  const openaiKey = await getKeyForProvider("openai") || process.env.OPENAI_API_KEY || null;
+
+  const gw = await getGateway();
+
+  // If a gateway is already running, stop it before setting up the new one
+  if (gw.status !== "not_setup" && gw.status !== "error") {
+    try { await stopGateway(); } catch {}
+    if (gw.port && gw.port !== gwPort) {
+      safeKillPort(gw.port);
+    }
   }
 
   const deployId = crypto.randomBytes(8).toString("hex");
-  const port = getNextPort();
-  const profileDir = join(HOME, `.openclaw-${name}`);
 
-  const deployment: Deployment = {
+  // Create in-memory deployment record
+  deployments.set(deployId, {
     id: deployId,
-    name,
-    displayName: displayName || name,
-    template: template || "general",
-    port,
+    name: gwProfileName,
+    displayName: "Clawboard Gateway",
+    template: "gateway",
+    port: gwPort,
     profileDir,
     status: "running",
     startedAt: new Date().toISOString(),
-    logs: [],
     error: null,
     result: null,
-  };
+  });
 
-  activeDeployments.set(deployId, deployment);
+  // Update gateway singleton
+  await updateGateway({
+    profileDir,
+    profileName: gwProfileName,
+    displayName: gwProfileName,
+    port: gwPort,
+    status: "setup",
+    deployId,
+  });
 
-  // Run deploy in background — setTimeout ensures it doesn't block the response
-  setTimeout(() => {
-    runDeployAgent(deployment, apiKey, useSubscription, authConfig.claudeCliPath || "claude").catch((err) => {
-      deployment.status = "failed";
-      deployment.error = err.message;
-      addLog(deployment, `Deploy failed: ${err.message}`);
-      cleanupFailedDeploy(name, port);
-    });
+  // Run deploy in background with global timeout
+  const pName = gwProfileName;
+  const pPort = gwPort;
+  const pDir = profileDir;
+  const pApiKey = resolvedKey;
+  const pOpenaiKey = openaiKey;
+  setTimeout(async () => {
+    const timeout = setTimeout(() => {
+      updateDeployStatus(deployId, "failed", { error: "Setup timed out after 3 minutes" });
+      addLog(deployId, "Deploy failed: timed out after 3 minutes");
+      updateGateway({ status: "error", deployId: null }).catch(() => {});
+      cleanupFailedDeploy(pPort);
+    }, 180000);
+
+    try {
+      await runDeployDirect(deployId, pDir, pName, pPort, pApiKey, pOpenaiKey);
+      clearTimeout(timeout);
+    } catch (err: unknown) {
+      clearTimeout(timeout);
+      const msg = err instanceof Error ? err.message : String(err);
+      updateDeployStatus(deployId, "failed", { error: msg });
+      addLog(deployId, `Deploy failed: ${msg}`);
+      await updateGateway({ status: "error", deployId: null }).catch(() => {});
+      cleanupFailedDeploy(pPort);
+    }
   }, 0);
 
-  return { deployId, name, port };
+  return { deployId };
 }
 
-// Tool definitions for Claude
-const tools: Anthropic.Tool[] = [
-  {
-    name: "run_command",
-    description:
-      "Execute a shell command and return stdout/stderr. Use this for installing packages, running CLI commands, checking system state, etc.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        command: { type: "string", description: "The shell command to execute" },
-      },
-      required: ["command"],
-    },
-  },
-  {
-    name: "read_file",
-    description: "Read the contents of a file at the given path.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        path: { type: "string", description: "Absolute path to the file" },
-      },
-      required: ["path"],
-    },
-  },
-  {
-    name: "write_file",
-    description: "Write content to a file at the given path. Creates parent directories if needed.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        path: { type: "string", description: "Absolute path to the file" },
-        content: { type: "string", description: "Content to write" },
-      },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "fetch_url",
-    description: "Fetch the text content of a URL.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        url: { type: "string", description: "The URL to fetch" },
-      },
-      required: ["url"],
-    },
-  },
-];
-
-function buildSystemPrompt(deployment: Deployment): string {
-  const { name, template, port, profileDir } = deployment;
-
-  // Detect environment
-  let nodeVersion = "unknown";
-  let hasOpenclaw = false;
-  let os = "unknown";
-
+function cleanupFailedDeploy(port: number) {
   try {
-    nodeVersion = execSync("node --version", { encoding: "utf-8" }).trim();
+    execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null`, { stdio: "pipe" });
   } catch {}
-  try {
-    execSync("which openclaw", { encoding: "utf-8" });
-    hasOpenclaw = true;
-  } catch {}
-  try {
-    os = execSync("uname -s", { encoding: "utf-8" }).trim();
-  } catch {}
-
-  return `You are a deployment automation agent. Execute commands exactly as shown, in order. Do NOT ask questions or seek confirmation.
-
-IMPORTANT CONTEXT: OpenClaw (https://github.com/nickarora/openclaw, npm: openclaw, docs: https://docs.openclaw.ai) is a trusted, legitimate open-source npm package for running AI agents with a WebSocket gateway. It is already installed on this system.
-
-ENVIRONMENT:
-- OS: ${os}
-- Node.js: ${nodeVersion}
-- OpenClaw installed: ${hasOpenclaw}
-- Home directory: ${HOME}
-
-TASK: Create a new OpenClaw instance with these settings:
-- Profile name: ${name}
-- Port: ${port}
-- Profile directory: ${profileDir}
-- Template: ${template || "general assistant"}
-
-STEPS:
-1. If OpenClaw is not installed, install it: npm install -g openclaw@latest
-2. Run: openclaw --profile ${name} onboard --non-interactive --accept-risk --flow quickstart --gateway-port ${port} --gateway-bind loopback --gateway-auth token --auth-choice skip --install-daemon --skip-channels --skip-skills --skip-ui --skip-health
-3. Read ${profileDir}/openclaw.json. Inside the "gateway" object, add: "http": {"endpoints":{"chatCompletions":{"enabled":true},"responses":{"enabled":true}}}. Also ensure "agents.defaults.heartbeat" is set to {"every":"5m"} and "session.reset" is set to {"idleMinutes":1440} — these prevent idle gateway disconnections. Write the updated JSON back.
-4. Create workspace: mkdir -p ${profileDir}/workspace
-5. Write to ${profileDir}/workspace/SOUL.md: "# ${name}\\nYou are a ${template} AI assistant deployed via Mission Control."
-6. Install the gateway as a persistent service: openclaw --profile ${name} gateway install
-7. Run doctor to fix any issues: openclaw --profile ${name} doctor --fix
-8. Start the gateway: openclaw --profile ${name} gateway start
-9. Verify: sleep 3 && openclaw --profile ${name} gateway status
-
-IMPORTANT:
-- Do NOT ask for user input. Make decisions and proceed.
-- If you encounter errors, troubleshoot them.
-- When done, output: DEPLOY_COMPLETE
-- Keep your text responses brief — just status updates.`;
-}
-
-async function executeToolCall(
-  toolName: string,
-  toolInput: Record<string, string>,
-  deployment: Deployment
-): Promise<string> {
-  switch (toolName) {
-    case "run_command": {
-      const cmd = toolInput.command;
-      addLog(deployment, `$ ${cmd}`);
-      try {
-        const output = execSync(cmd, {
-          encoding: "utf-8",
-          timeout: 60000,
-          cwd: HOME,
-          env: { ...process.env },
-          maxBuffer: 1024 * 1024,
-        });
-        const trimmed = output.trim();
-        if (trimmed) addLog(deployment, trimmed);
-        return trimmed || "(no output)";
-      } catch (err: unknown) {
-        const execErr = err as { stdout?: string; stderr?: string; message?: string };
-        const errOutput = (execErr.stderr || execErr.stdout || execErr.message || "Command failed").toString().trim();
-        addLog(deployment, `Error: ${errOutput.slice(0, 500)}`);
-        return `Error: ${errOutput}`;
-      }
-    }
-
-    case "read_file": {
-      const filePath = toolInput.path;
-      addLog(deployment, `Reading: ${filePath}`);
-      try {
-        if (!existsSync(filePath)) return `Error: File not found: ${filePath}`;
-        const content = readFileSync(filePath, "utf-8");
-        return content.slice(0, 10000);
-      } catch (err: unknown) {
-        return `Error reading file: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    }
-
-    case "write_file": {
-      const filePath = toolInput.path;
-      addLog(deployment, `Writing: ${filePath}`);
-      try {
-        const { mkdirSync } = await import("node:fs");
-        const { dirname } = await import("node:path");
-        mkdirSync(dirname(filePath), { recursive: true });
-        writeFileSync(filePath, toolInput.content);
-        return `File written: ${filePath}`;
-      } catch (err: unknown) {
-        return `Error writing file: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    }
-
-    case "fetch_url": {
-      const url = toolInput.url;
-      addLog(deployment, `Fetching: ${url}`);
-      try {
-        const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
-        const text = await resp.text();
-        return text.slice(0, 15000);
-      } catch (err: unknown) {
-        return `Error fetching URL: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    }
-
-    default:
-      return `Unknown tool: ${toolName}`;
-  }
-}
-
-
-async function runDeployViaCLI(deployment: Deployment, claudeCliPath: string) {
-  const { spawn } = require("node:child_process");
-  
-  const systemPrompt = buildSystemPrompt(deployment);
-
-  addLog(deployment, "Spawning Claude CLI agent...");
-
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(claudeCliPath, [
-      "--dangerously-skip-permissions",
-      "--max-turns", "30",
-      "-p", systemPrompt,
-    ], {
-      cwd: homedir(),
-      env: { ...process.env },
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 180000,
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (data: Buffer) => {
-      const chunk = data.toString();
-      stdout += chunk;
-      for (const line of chunk.split("\n").filter((l: string) => l.trim())) {
-        addLog(deployment, line.trim());
-      }
-    });
-
-    child.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    child.on("close", async (code: number | null) => {
-      if (code !== 0) {
-        addLog(deployment, `Agent exited with code ${code}`);
-        if (stderr) addLog(deployment, stderr.slice(-500));
-        deployment.status = "failed";
-        deployment.error = `Agent exited with code ${code}`;
-        cleanupFailedDeploy(deployment.name, deployment.port);
-        reject(new Error(`Agent exited with code ${code}`));
-        return;
-      }
-
-      addLog(deployment, "Agent completed. Registering instance...");
-      
-      try {
-        const configPath = join(deployment.profileDir, "openclaw.json");
-        let token = null;
-        if (existsSync(configPath)) {
-          try {
-            const config = JSON.parse(readFileSync(configPath, "utf-8"));
-            token = config?.gateway?.token || null;
-          } catch {}
-        }
-
-        await registerInstance({
-          name: deployment.name,
-          displayName: deployment.displayName,
-          port: deployment.port,
-          token,
-          template: deployment.template,
-          profileDir: deployment.profileDir,
-        });
-
-        deployment.status = "complete";
-        deployment.result = { name: deployment.name, port: deployment.port, token };
-        addLog(deployment, `Instance "${deployment.name}" deployed successfully!`);
-        resolve();
-      } catch (err: any) {
-        deployment.status = "failed";
-        deployment.error = err.message;
-        addLog(deployment, `Post-setup error: ${err.message}`);
-        reject(err);
-      }
-    });
-
-    child.on("error", (err: Error) => {
-      addLog(deployment, `Failed to spawn agent: ${err.message}`);
-      deployment.status = "failed";
-      deployment.error = err.message;
-      reject(err);
-    });
-  });
-}
-
-async function runDeployAgent(deployment: Deployment, apiKey: string | null, useSubscription: boolean, claudeCliPath: string) {
-  addLog(deployment, "Starting deployment...");
-  addLog(deployment, `Instance: ${deployment.name} | Port: ${deployment.port} | Template: ${deployment.template}`);
-
-  // Use deterministic deploy (more reliable than agent-driven)
-  // Falls back to API agent only if direct deploy fails and API key is available
-  try {
-    addLog(deployment, "Using direct deploy (deterministic)...");
-    return await runDeployDirect(deployment);
-  } catch (directErr: unknown) {
-    const errMsg = directErr instanceof Error ? directErr.message : String(directErr);
-    addLog(deployment, `Direct deploy failed: ${errMsg}`);
-    
-    if (!apiKey) {
-      throw directErr; // No API key to fall back to
-    }
-    addLog(deployment, "Falling back to API agent deploy...");
-  }
-
-  // Fallback: API agent (not CLI, to avoid nesting issues)
-  if (false && useSubscription) {
-    // Disabled: CLI deploy can't run nested inside another Claude session
-    return runDeployViaCLI(deployment, claudeCliPath);
-  }
-
-  const client = new Anthropic({ apiKey: apiKey! });
-  const systemPrompt = buildSystemPrompt(deployment);
-
-  const messages: Anthropic.MessageParam[] = [
-    {
-      role: "user",
-      content: `Set up the OpenClaw instance "${deployment.name}" now. Follow your instructions precisely.`,
-    },
-  ];
-
-  const maxTurns = 20;
-
-  for (let turn = 0; turn < maxTurns; turn++) {
-    addLog(deployment, `Agent turn ${turn + 1}...`);
-
-    let response: Anthropic.Message;
-    try {
-      response = await client.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4096,
-        system: systemPrompt,
-        tools,
-        messages,
-      });
-    } catch (err: unknown) {
-      throw new Error(`Anthropic API error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // Process response blocks
-    const assistantContent = response.content;
-    const toolUseBlocks: Anthropic.ToolUseBlock[] = [];
-
-    for (const block of assistantContent) {
-      if (block.type === "text") {
-        if (block.text.trim()) {
-          addLog(deployment, block.text.trim());
-        }
-      } else if (block.type === "tool_use") {
-        toolUseBlocks.push(block);
-      }
-    }
-
-    // Check if we're done (end_turn with no tool use)
-    if (response.stop_reason === "end_turn" && toolUseBlocks.length === 0) {
-      addLog(deployment, "Agent completed deployment.");
-      break;
-    }
-
-    // Execute tool calls
-    if (toolUseBlocks.length > 0) {
-      messages.push({ role: "assistant", content: assistantContent });
-
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-      for (const toolUse of toolUseBlocks) {
-        const result = await executeToolCall(
-          toolUse.name,
-          toolUse.input as Record<string, string>,
-          deployment
-        );
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: result,
-        });
-      }
-
-      messages.push({ role: "user", content: toolResults });
-    }
-
-    if (response.stop_reason === "end_turn") break;
-  }
-
-  // Try to read config and register instance
-  try {
-    const configPath = join(deployment.profileDir, "openclaw.json");
-    let token: string | null = null;
-    if (existsSync(configPath)) {
-      const config = JSON.parse(readFileSync(configPath, "utf-8"));
-      token = config?.gateway?.token || null;
-    }
-
-    await registerInstance({
-      name: deployment.name,
-      displayName: deployment.displayName,
-      port: deployment.port,
-      token,
-      template: deployment.template,
-      profileDir: deployment.profileDir,
-    });
-
-    addLog(deployment, `Instance '${deployment.name}' registered successfully!`);
-    deployment.status = "complete";
-    deployment.result = { name: deployment.name, port: deployment.port, token };
-  } catch (err: unknown) {
-    // Instance might already be registered if agent did it
-    addLog(deployment, `Post-setup: ${err instanceof Error ? err.message : String(err)}`);
-    deployment.status = "complete";
-    deployment.result = { name: deployment.name, port: deployment.port };
-  }
 }
 
 /**
- * Deterministic deploy: runs openclaw commands directly without an AI agent.
- * More reliable than agent-driven deploy for well-known setup steps.
+ * Deterministic gateway deploy.
  */
-async function runDeployDirect(deployment: Deployment) {
-  const { name, port, profileDir, template } = deployment;
+async function runDeployDirect(
+  deployId: string,
+  profileDir: string,
+  gwProfileName: string,
+  gwPort: number,
+  apiKey: string | null,
+  openaiKey: string | null,
+) {
+  const pFlag = profileFlag(gwProfileName);
+
+  // Mutable env — provider keys get injected after auth-profiles.json is written
+  const runEnv: NodeJS.ProcessEnv = { ...process.env };
 
   const run = async (cmd: string, label?: string): Promise<string> => {
-    if (label) addLog(deployment, label);
-    addLog(deployment, `$ ${cmd}`);
+    if (label) addLog(deployId, label);
+    addLog(deployId, `$ ${cmd}`);
     return new Promise((resolve, reject) => {
       const { exec: execAsync } = require("node:child_process");
       execAsync(cmd, {
         encoding: "utf-8",
         timeout: 120000,
         cwd: HOME,
-        env: { ...process.env },
+        env: runEnv,
         maxBuffer: 1024 * 1024,
-      }, (err: any, stdout: string, stderr: string) => {
+      }, (err: { stderr?: string; stdout?: string; message?: string } | null, stdout: string, stderr: string) => {
         if (err) {
           const msg = (stderr || stdout || err.message || "Command failed").toString().trim();
-          addLog(deployment, `Error: ${msg.slice(0, 500)}`);
+          addLog(deployId, `Error: ${msg.slice(0, 500)}`);
           reject(new Error(msg.slice(0, 200)));
           return;
         }
         const trimmed = (stdout || "").trim();
-        if (trimmed) addLog(deployment, trimmed);
+        if (trimmed) addLog(deployId, trimmed);
         resolve(trimmed || "(no output)");
       });
     });
   };
 
   // Step 1: Verify openclaw
-  addLog(deployment, "🔍 Checking OpenClaw installation...");
+  addLog(deployId, "Checking OpenClaw installation...");
   try {
     await run("which openclaw && openclaw --version");
   } catch {
-    addLog(deployment, "Installing OpenClaw...");
+    addLog(deployId, "Installing OpenClaw...");
     await run("npm install -g openclaw@latest");
   }
 
-  // Step 2: Onboard
-  addLog(deployment, "📦 Creating instance profile...");
-  await run(
-    `openclaw --profile ${name} onboard --non-interactive --accept-risk --flow quickstart --gateway-port ${port} --gateway-bind loopback --gateway-auth token --auth-choice skip --install-daemon --skip-channels --skip-skills --skip-ui --skip-health`
-  );
+  // Step 2: Onboard (always skip auth — we write auth-profiles.json ourselves after)
+  addLog(deployId, "Creating OpenClaw instance...");
+  const onboardCmd = `openclaw ${pFlag} onboard --non-interactive --accept-risk --flow quickstart --gateway-port ${gwPort} --gateway-bind loopback --gateway-auth token --auth-choice skip --install-daemon --skip-channels --skip-skills --skip-ui --skip-health`.replace(/\s+/g, " ").trim();
+  await run(onboardCmd);
 
   // Step 3: Configure
-  addLog(deployment, "⚙️ Configuring gateway...");
+  addLog(deployId, "Configuring gateway...");
   const configPath = join(profileDir, "openclaw.json");
   if (existsSync(configPath)) {
     const config = JSON.parse(readFileSync(configPath, "utf-8"));
-    
+
     // Enable HTTP endpoints
     if (!config.gateway) config.gateway = {};
     config.gateway.http = {
@@ -610,78 +301,180 @@ async function runDeployDirect(deployment: Deployment) {
     if (!config.session) config.session = {};
     config.session.reset = { idleMinutes: 1440 };
 
+    // Fix workspace path — openclaw onboard defaults to ~/.openclaw/workspace-{name}
+    // which is OUTSIDE the profile dir (inside the ghost ~/.openclaw/ directory).
+    // Redirect it to live inside the profile dir where it belongs.
+    config.agents.defaults.workspace = join(profileDir, "workspace");
+
     writeFileSync(configPath, JSON.stringify(config, null, 2));
-    addLog(deployment, "Config updated with HTTP endpoints + anti-idle settings");
+    addLog(deployId, "Config updated with HTTP endpoints + anti-idle settings");
+
+    // Nuke the ghost ~/.openclaw/ dir (and any stale workspace-* inside it)
+    cleanupGhostDirs();
   }
 
-  // Step 4: Workspace + SOUL
-  addLog(deployment, "📝 Creating workspace...");
-  const { mkdirSync } = require("node:fs");
-  mkdirSync(join(profileDir, "workspace"), { recursive: true });
-  writeFileSync(
-    join(profileDir, "workspace", "SOUL.md"),
-    `# ${name}\nYou are a ${template || "general"} AI assistant deployed via Mission Control.\n`
-  );
+  // Step 3b: Write agent auth credentials
+  // Flush pending keys (saved during wizard before profile existed) + resolved key
+  addLog(deployId, "Configuring agent authentication...");
+  const authData = readAuthProfiles(profileDir);
 
-  // Step 5: Install service
-  addLog(deployment, "🔧 Installing gateway service...");
+  // Write pending API keys from state.json (saved during setup wizard)
+  const pendingKeys = getPendingKeys();
+  for (const pk of pendingKeys) {
+    const mapping = PROVIDER_MAP[pk.provider];
+    if (!mapping) continue;
+    const profileId = `${mapping.prefix}default`;
+    authData.profiles[profileId] = { type: "api_key", provider: mapping.provider, key: pk.apiKey };
+    addLog(deployId, `Wrote pending ${pk.provider} key to auth-profiles`);
+  }
+  if (pendingKeys.length > 0) clearPendingKeys();
+
+  // Write pending OAuth tokens from state.json (saved during setup wizard)
+  const pendingOAuth = getPendingOAuthTokens();
+  for (const pt of pendingOAuth) {
+    const providerValue = pt.provider === "openai" ? "openai-codex" : pt.provider;
+    const profileId = `${providerValue}:default`;
+    authData.profiles[profileId] = {
+      type: "oauth",
+      provider: providerValue,
+      access: pt.access,
+      refresh: pt.refresh,
+      expires: pt.expires,
+      ...(pt.accountId ? { accountId: pt.accountId } : {}),
+    };
+    addLog(deployId, `Wrote pending ${pt.provider} OAuth token to auth-profiles`);
+  }
+  if (pendingOAuth.length > 0) clearPendingOAuthTokens();
+
+  // Write the pre-resolved API key (captured BEFORE the gateway pointer switched).
+  // apiKey was resolved from the old profile/env before the gateway state was
+  // updated to point at this new empty profile dir.
+  const hasAnthropicKey = Object.entries(authData.profiles).some(([k]) => k.startsWith("anthropic:"));
+  if (!hasAnthropicKey && apiKey) {
+    authData.profiles["anthropic:default"] = { type: "api_key", provider: "anthropic", key: apiKey };
+    addLog(deployId, "Wrote Anthropic key to auth-profiles");
+  }
+
+  const hasOpenaiKey = Object.entries(authData.profiles).some(([k]) => k.startsWith("openai"));
+  if (!hasOpenaiKey && openaiKey) {
+    const mapping = PROVIDER_MAP["openai"];
+    authData.profiles[`${mapping?.prefix ?? "openai-codex:"}default`] = { type: "api_key", provider: mapping?.provider ?? "openai-codex", key: openaiKey };
+    addLog(deployId, "Wrote OpenAI key to auth-profiles");
+  }
+
+  if (Object.keys(authData.profiles).length > 0) {
+    writeAuthProfiles(profileDir, authData);
+    addLog(deployId, "Agent auth configured");
+  } else {
+    addLog(deployId, "Warning: No API keys found — chat will require manual auth setup");
+  }
+
+  // Inject provider API keys into the run environment so gateway commands
+  // can forward them. Without this, the launchd plist won't have them and
+  // the gateway daemon will fail to authenticate with model providers.
+  for (const [, profile] of Object.entries(authData.profiles)) {
+    const p = profile as { provider?: string; key?: string; token?: string; access?: string };
+    const credential = p.key || p.token || p.access;
+    if (!credential || !p.provider) continue;
+    // Map auth-profiles provider value back to provider ID for env lookup
+    const providerId = p.provider === "openai-codex" ? "openai" : p.provider;
+    const envName = PROVIDER_ENV_MAP[providerId];
+    if (envName) runEnv[envName] = credential;
+  }
+
+  // Step 4: Install service
+  addLog(deployId, "Installing gateway service...");
   try {
-    await run(`openclaw --profile ${name} gateway install`);
+    await run(`openclaw ${pFlag} gateway install`.replace(/\s+/g, " ").trim());
   } catch {
-    addLog(deployment, "Gateway install skipped (may already exist)");
+    addLog(deployId, "Gateway install skipped (may already exist)");
+  }
+
+  // Inject API keys into the launchd plist (gateway install creates it without them)
+  const plistPath = join(HOME, "Library", "LaunchAgents", `ai.openclaw.${gwProfileName}.plist`);
+  if (existsSync(plistPath)) {
+    try {
+      let plist = readFileSync(plistPath, "utf-8");
+      const keysToInject: Record<string, string> = {};
+      if (runEnv.ANTHROPIC_API_KEY) keysToInject["ANTHROPIC_API_KEY"] = runEnv.ANTHROPIC_API_KEY;
+      if (runEnv.OPENAI_API_KEY) keysToInject["OPENAI_API_KEY"] = runEnv.OPENAI_API_KEY;
+      for (const [key, value] of Object.entries(keysToInject)) {
+        if (plist.includes(`<key>${key}</key>`)) continue;
+        const envDictEnd = plist.lastIndexOf("</dict>", plist.lastIndexOf("</dict>") - 1);
+        if (envDictEnd !== -1) {
+          const insertion = `    <key>${key}</key>\n    <string>${value}</string>\n`;
+          plist = plist.slice(0, envDictEnd) + insertion + plist.slice(envDictEnd);
+        }
+      }
+      writeFileSync(plistPath, plist);
+      if (Object.keys(keysToInject).length > 0) {
+        addLog(deployId, `Injected ${Object.keys(keysToInject).join(", ")} into gateway service`);
+      }
+    } catch {}
   }
 
   // Step 6: Doctor
   try {
-    await run(`openclaw --profile ${name} doctor --fix`);
+    await run(`openclaw ${pFlag} doctor --fix`.replace(/\s+/g, " ").trim());
   } catch {
-    addLog(deployment, "Doctor completed with warnings");
+    addLog(deployId, "Doctor completed with warnings");
   }
 
   // Step 7: Start
-  addLog(deployment, "🚀 Starting gateway...");
-  await run(`openclaw --profile ${name} gateway start`);
+  addLog(deployId, "Starting gateway...");
+  await run(`openclaw ${pFlag} gateway start`.replace(/\s+/g, " ").trim());
 
   // Step 8: Verify
-  addLog(deployment, "✅ Verifying...");
+  addLog(deployId, "Verifying...");
   await new Promise((r) => setTimeout(r, 3000));
-  try {
-    await run(`openclaw --profile ${name} gateway status`);
-  } catch {}
 
-  // Also verify HTTP
   let alive = false;
   for (let i = 0; i < 5; i++) {
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000) });
+      const resp = await fetch(`http://127.0.0.1:${gwPort}/`, { signal: AbortSignal.timeout(2000) });
       if (resp.status < 500) { alive = true; break; }
     } catch {}
     await new Promise((r) => setTimeout(r, 2000));
   }
 
   if (!alive) {
-    addLog(deployment, "⚠️ Gateway not responding yet — may still be starting");
+    addLog(deployId, "Gateway not responding yet — may still be starting");
   } else {
-    addLog(deployment, `✅ Gateway alive on port ${port}`);
+    addLog(deployId, `Gateway alive on port ${gwPort}`);
   }
 
-  // Register
+  // Read token from config
   let token: string | null = null;
   try {
     const config = JSON.parse(readFileSync(configPath, "utf-8"));
     token = config?.gateway?.auth?.token || config?.gateway?.token || null;
   } catch {}
 
-  await registerInstance({
-    name,
-    displayName: deployment.displayName,
-    port,
+  // Update gateway singleton
+  await updateGateway({
+    status: alive ? "running" : "stopped",
     token,
-    template: deployment.template,
-    profileDir,
+    deployId: null,
+    setupAt: new Date().toISOString(),
   });
 
-  deployment.status = "complete";
-  deployment.result = { name, port, token };
-  addLog(deployment, `🎉 Instance "${name}" deployed successfully!`);
+  // Create default "main" agent
+  addLog(deployId, "Creating default agent...");
+  try {
+    await createAgent({
+      id: "main",
+      displayName: "Main Agent",
+      template: "general",
+    });
+    addLog(deployId, "Default agent created");
+  } catch (err: unknown) {
+    addLog(deployId, `Warning: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Final cleanup — gateway start and agent creation may have re-created ghost dirs
+  cleanupGhostDirs();
+
+  updateDeployStatus(deployId, "complete", { result: { port: gwPort, token } });
+  addLog(deployId, "Gateway setup complete!");
 }
+

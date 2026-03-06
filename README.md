@@ -1,4 +1,4 @@
-# ⚡ Mission Control
+# ⚡ Clawboard
 
 AI Agent Operations Platform — deploy, manage, and monitor OpenClaw AI agent instances.
 
@@ -30,8 +30,8 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Architecture
 
-- Instance registry: `~/.mission-control/instances.json`
-- Auth config: `~/.mission-control/auth.json`
+- Instance registry: `~/.clawboard/instances.json`
+- Auth config: `~/.clawboard/auth.json`
 - Theme preference: `localStorage`
 - Each agent instance: `~/.openclaw-<name>/`
 

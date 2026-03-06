@@ -1,13 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { getAuthState, updateAuthState, getGatewayState } from "./mc-state";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const HOME = homedir();
-const MC_STATE = join(HOME, ".mission-control");
-const AUTH_FILE = join(MC_STATE, "auth.json");
-
-interface AuthConfig {
-  anthropicApiKey?: string;
+export interface AuthConfig {
   authMethod?: string; // "api-key" | "subscription"
   provider?: string;
   configuredAt?: string;
@@ -15,42 +10,70 @@ interface AuthConfig {
   claudeCliPath?: string;
 }
 
-function ensureState() {
-  if (!existsSync(MC_STATE)) mkdirSync(MC_STATE, { recursive: true });
+export async function getAuthConfig(): Promise<AuthConfig> {
+  const state = getAuthState();
+  return {
+    authMethod: state.authMethod ?? undefined,
+    provider: state.provider ?? undefined,
+    configuredAt: state.configuredAt ?? undefined,
+    subscriptionType: state.subscriptionType ?? undefined,
+    claudeCliPath: state.claudeCliPath ?? undefined,
+  };
 }
 
-export function getAuthConfig(): AuthConfig {
-  ensureState();
-  if (!existsSync(AUTH_FILE)) return {};
-  try {
-    return JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
-  } catch {
-    return {};
+export async function saveAuthConfig(config: Partial<AuthConfig>): Promise<void> {
+  updateAuthState({
+    ...(config.authMethod !== undefined && { authMethod: config.authMethod ?? null }),
+    ...(config.provider !== undefined && { provider: config.provider ?? null }),
+    ...(config.subscriptionType !== undefined && { subscriptionType: config.subscriptionType ?? null }),
+    ...(config.claudeCliPath !== undefined && { claudeCliPath: config.claudeCliPath ?? null }),
+    configuredAt: new Date().toISOString(),
+  });
+}
+
+export async function clearAuthConfig(): Promise<void> {
+  updateAuthState({
+    authMethod: null,
+    provider: null,
+    configuredAt: null,
+    subscriptionType: null,
+    claudeCliPath: null,
+  });
+}
+
+export async function hasApiKey(): Promise<boolean> {
+  const config = getAuthState();
+  // Check auth-profiles.json on disk
+  const key = await getApiKey();
+  return !!key || config.authMethod === "subscription";
+}
+
+export async function getApiKey(): Promise<string | null> {
+  // Read from active profile's auth-profiles.json
+  const gw = getGatewayState();
+  if (gw.profileDir) {
+    const authPath = join(gw.profileDir, "agents", "main", "agent", "auth-profiles.json");
+    if (existsSync(authPath)) {
+      try {
+        const data = JSON.parse(readFileSync(authPath, "utf-8"));
+        const profiles = data?.profiles || {};
+        for (const [key, value] of Object.entries(profiles)) {
+          const entry = value as { provider?: string; key?: string; token?: string };
+          const apiKey = entry.key || entry.token;
+          if (apiKey && (key.startsWith("anthropic:") || entry.provider === "anthropic")) {
+            return apiKey;
+          }
+        }
+      } catch {}
+    }
   }
+  return null;
 }
 
-export function saveAuthConfig(config: Partial<AuthConfig>): void {
-  ensureState();
-  const existing = getAuthConfig();
-  const merged = { ...existing, ...config, configuredAt: new Date().toISOString() };
-  writeFileSync(AUTH_FILE, JSON.stringify(merged, null, 2));
+export async function getAuthMethod(): Promise<string | null> {
+  return getAuthState().authMethod;
 }
 
-export function hasApiKey(): boolean {
-  const config = getAuthConfig();
-  return !!config.anthropicApiKey || config.authMethod === "subscription";
-}
-
-export function getApiKey(): string | null {
-  const config = getAuthConfig();
-  return config.anthropicApiKey || null;
-}
-
-export function getAuthMethod(): string | null {
-  const config = getAuthConfig();
-  return config.authMethod || null;
-}
-
-export function isSubscriptionAuth(): boolean {
-  return getAuthConfig().authMethod === "subscription";
+export async function isSubscriptionAuth(): Promise<boolean> {
+  return getAuthState().authMethod === "subscription";
 }

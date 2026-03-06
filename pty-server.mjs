@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 const PORT = 3001;
 const HOME = homedir();
-const MC_STATE = join(HOME, ".mission-control");
+const MC_STATE = join(HOME, ".clawboard");
 const REGISTRY = join(MC_STATE, "instances.json");
 const AUTH_FILE = join(MC_STATE, "auth.json");
 const BASE_PORT = 19100;
@@ -129,7 +129,7 @@ async function handleDeploy(ws, msg) {
 
   try {
     sendLine(ws, sessionId, "\x1b[1;36m╔══════════════════════════════════════════╗\x1b[0m");
-    sendLine(ws, sessionId, "\x1b[1;36m║   Mission Control — Deploying Agent      ║\x1b[0m");
+    sendLine(ws, sessionId, "\x1b[1;36m║   Clawboard — Deploying Agent            ║\x1b[0m");
     sendLine(ws, sessionId, "\x1b[1;36m╚══════════════════════════════════════════╝\x1b[0m");
     sendLine(ws, sessionId, "");
     sendLine(ws, sessionId, `\x1b[1mInstance:\x1b[0m ${name}  \x1b[1mPort:\x1b[0m ${port}  \x1b[1mTemplate:\x1b[0m ${template || "general"}`);
@@ -174,7 +174,7 @@ async function handleDeploy(ws, msg) {
     sendLine(ws, sessionId, "\x1b[1;33m▸ Step 4/7: Creating workspace\x1b[0m");
     mkdirSync(join(profileDir, "workspace"), { recursive: true });
     writeFileSync(join(profileDir, "workspace", "SOUL.md"),
-      `# ${name}\nYou are a ${template || "general"} AI assistant deployed via Mission Control.\n`);
+      `# ${name}\nYou are a ${template || "general"} AI assistant deployed via Clawboard.\n`);
     sendLine(ws, sessionId, "\x1b[32m✓ Workspace + SOUL.md created\x1b[0m");
     sendLine(ws, sessionId, "");
 

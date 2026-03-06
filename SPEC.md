@@ -1,4 +1,4 @@
-# Mission Control — AI Agent Operations Platform
+# Clawboard — AI Agent Operations Platform
 
 ## Overview
 A Next.js + Electron app for deploying and managing OpenClaw AI agent instances. 
@@ -11,7 +11,7 @@ Browser-first for development, Electron wrapper for production.
 - **shadcn/ui** (components)
 - **Electron** (desktop wrapper — add later, browser-first for now)
 - **Node.js** backend (API routes in Next.js)
-- **No database** — JSON file registry at ~/.mission-control/instances.json
+- **No database** — JSON file registry at ~/.clawboard/instances.json
 
 ## Design Language
 Apple Liquid Glass + Linear (developer tool aesthetic):
@@ -83,7 +83,7 @@ Delete instance (kills process, removes profile dir, removes from registry).
 Delete ALL instances (double-confirm on frontend).
 
 ## Instance Registry
-File: ~/.mission-control/instances.json
+File: ~/.clawboard/instances.json
 ```json
 [{
   "name": "my-agent",
