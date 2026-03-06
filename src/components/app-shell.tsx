@@ -10,6 +10,7 @@ import { LiveProvider } from "./live-provider";
 import { SetupWizard } from "./setup-wizard";
 import { InstallStatusBar } from "./install-status-bar";
 import { NotificationBell } from "./notification-bell";
+import { DiagnoseButton } from "./diagnose-button";
 import { InstanceDropdown } from "./instance-dropdown";
 
 type OnboardingState = "loading" | "onboarding-gateway" | "onboarding-provider" | "ready";
@@ -177,6 +178,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
 
       {/* Top-right controls: notification bell + instance dropdown */}
       <div className="absolute top-3 right-3 z-40 flex items-center gap-2">
+        <DiagnoseButton />
         <NotificationBell />
         <InstanceDropdown />
       </div>
