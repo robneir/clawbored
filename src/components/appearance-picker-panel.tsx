@@ -88,7 +88,7 @@ export function AppearancePickerPanel({ onContinue }: { onContinue: () => void }
                       backgroundColor: done
                         ? "var(--mc-accent)"
                         : active
-                        ? "rgba(99, 102, 241, 0.15)"
+                        ? "var(--mc-surface)"
                         : "var(--mc-surface)",
                       border: active
                         ? "1.5px solid var(--mc-accent)"

@@ -66,8 +66,10 @@ export function InstanceDropdown() {
         body: JSON.stringify({ profileDir }),
       });
       if (res.ok) {
-        await fetchProfiles();
+        // Refresh gateway state immediately — SSE will also pick this up
         refreshGateway();
+        // Profile list refresh in background (don't block the UI)
+        fetchProfiles();
       }
     } catch {}
     setSwitching(null);

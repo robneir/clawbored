@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { GatewayActionDialog } from "@/components/gateway-action-dialog";
 import { DeployAnimation } from "@/components/deploy-animation";
 import { useGateway } from "@/components/gateway-provider";
+import { useLive } from "@/components/live-provider";
 import { toast } from "sonner";
 
 interface Agent {
@@ -34,15 +35,6 @@ interface Agent {
   status: string;
   createdAt: string;
   avatar: string;
-}
-
-interface Gateway {
-  port: number;
-  status: string;
-  live?: boolean;
-  displayName?: string;
-  profileName?: string;
-  deployId?: string | null;
 }
 
 interface ActivityEvent {
@@ -227,36 +219,46 @@ const item = {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { triggerTransition } = useGateway();
+  const { triggerTransition, gateway, refresh: refreshGateway } = useGateway();
+  const live = useLive();
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [gateway, setGateway] = useState<Gateway | null>(null);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fullActivity, setFullActivity] = useState<ActivityEvent[]>([]);
 
+  // Sync agents from live data
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 3000);
-    return () => clearInterval(interval);
-  }, []);
-
-  async function fetchData() {
-    try {
-      const [agentsRes, gwRes, actRes] = await Promise.all([
-        fetch("/api/agents"),
-        fetch("/api/gateway"),
-        fetch("/api/activity?limit=200"),
-      ]);
-      if (agentsRes.ok) setAgents(await agentsRes.json());
-      if (gwRes.ok) setGateway(await gwRes.json());
-      if (actRes.ok) {
-        const data = await actRes.json();
-        setEvents(data.events || []);
-      }
-    } catch {
-    } finally {
+    if (live.agents.length > 0) {
+      setAgents(live.agents as unknown as Agent[]);
       setLoading(false);
     }
-  }
+  }, [live.agents]);
+
+  // Sync activity from live data (SSE provides last 50)
+  useEffect(() => {
+    if (live.activity.length > 0) {
+      setEvents(live.activity as ActivityEvent[]);
+    }
+  }, [live.activity]);
+
+  // Fetch full 200-event activity for charts on mount
+  useEffect(() => {
+    async function fetchFullActivity() {
+      try {
+        const res = await fetch("/api/activity?limit=200");
+        if (res.ok) {
+          const data = await res.json();
+          setFullActivity(data.events || []);
+        }
+      } catch {}
+    }
+    fetchFullActivity();
+  }, []);
+
+  // Once we get SSE data, mark loading done
+  useEffect(() => {
+    if (live.connected && loading) setLoading(false);
+  }, [live.connected, loading]);
 
   async function handleStart() {
     try {
@@ -266,7 +268,7 @@ export default function DashboardPage() {
         throw new Error(data.error || "Failed to start gateway");
       }
       toast.success("Gateway started");
-      fetchData();
+      refreshGateway();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to start gateway");
     }
@@ -276,11 +278,14 @@ export default function DashboardPage() {
   const gwNotSetup = gateway?.status === "not_setup";
   const gwDeploying = gateway?.status === "setup" && !!gateway?.deployId;
 
+  // Use the larger dataset for stats/charts, falling back to live SSE data
+  const chartEvents = fullActivity.length > 0 ? fullActivity : events;
+
   // Compute stats
   const now = Date.now();
   const eventsToday = useMemo(
-    () => events.filter((e) => now - e.timestamp < 86400000),
-    [events, now]
+    () => chartEvents.filter((e) => now - e.timestamp < 86400000),
+    [chartEvents, now]
   );
   const activeSessions = useMemo(() => {
     const sessions = new Set<string>();
@@ -303,8 +308,8 @@ export default function DashboardPage() {
           <div
             className="w-16 h-16 rounded-2xl mx-auto mb-6 flex items-center justify-center"
             style={{
-              backgroundColor: "rgba(99, 102, 241, 0.08)",
-              border: "1px solid rgba(99, 102, 241, 0.15)",
+              backgroundColor: "var(--mc-surface)",
+              border: "1px solid var(--mc-border)",
             }}
           >
             <Rocket className="w-8 h-8" style={{ color: "var(--mc-accent)", opacity: 0.8 }} />
@@ -363,8 +368,8 @@ export default function DashboardPage() {
             deployId={gateway.deployId}
             instanceName={gateway.profileName || "Profile"}
             displayName={gateway.displayName || gateway.profileName || "Profile"}
-            onComplete={fetchData}
-            onError={() => fetchData()}
+            onComplete={refreshGateway}
+            onError={() => refreshGateway()}
           />
         </motion.div>
       )}
@@ -388,14 +393,14 @@ export default function DashboardPage() {
             size="sm"
             onClick={handleStart}
             className="rounded-xl gap-1.5 text-sm"
-            style={{ color: "var(--mc-accent)", border: "1px solid rgba(99, 102, 241, 0.2)" }}
+            style={{ color: "var(--mc-accent)", border: "1px solid var(--mc-border)" }}
           >
             <Play className="w-3.5 h-3.5" />
             Start
           </Button>
           <GatewayActionDialog
             action="delete"
-            onComplete={fetchData}
+            onComplete={refreshGateway}
             trigger={
               <Button
                 variant="ghost"
@@ -427,7 +432,7 @@ export default function DashboardPage() {
           </div>
           <GatewayActionDialog
             action="stop"
-            onComplete={fetchData}
+            onComplete={refreshGateway}
             trigger={
               <Button
                 variant="ghost"
@@ -442,7 +447,7 @@ export default function DashboardPage() {
           />
           <GatewayActionDialog
             action="delete"
-            onComplete={fetchData}
+            onComplete={refreshGateway}
             trigger={
               <Button
                 variant="ghost"
@@ -512,7 +517,7 @@ export default function DashboardPage() {
               {eventsToday.length}
             </div>
             <div className="w-24 h-5 flex-shrink-0">
-              <Sparkline events={events} />
+              <Sparkline events={chartEvents} />
             </div>
           </div>
         </motion.div>
@@ -541,7 +546,7 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="h-28">
-            <ActivityChart events={events} />
+            <ActivityChart events={chartEvents} />
           </div>
           <div className="flex justify-between mt-2">
             <span className="text-[10px]" style={{ color: "var(--mc-muted)", opacity: 0.5 }}>24h ago</span>

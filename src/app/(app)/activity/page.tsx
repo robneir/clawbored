@@ -13,6 +13,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useLive } from "@/components/live-provider";
 
 interface ActivityEvent {
   id: string;
@@ -103,6 +104,7 @@ function groupByDate(
 }
 
 export default function ActivityPage() {
+  const live = useLive();
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -112,6 +114,7 @@ export default function ActivityPage() {
   // Filters
   const [filterAgent, setFilterAgent] = useState("");
   const [filterKind, setFilterKind] = useState("");
+  const hasFilters = filterAgent || filterKind;
 
   const fetchEvents = useCallback(
     async (before?: number, append = false) => {
@@ -148,21 +151,32 @@ export default function ActivityPage() {
     [filterAgent, filterKind]
   );
 
+  // When filters are active, fetch from API; otherwise use live data
   useEffect(() => {
-    fetchEvents();
+    if (hasFilters) {
+      fetchEvents();
+    }
+  }, [fetchEvents, hasFilters]);
 
-    // Fetch agents for filter dropdown
-    fetch("/api/agents")
-      .then((r) => (r.ok ? r.json() : []))
-      .then((data) => setAgents(data))
-      .catch(() => {});
-  }, [fetchEvents]);
-
-  // Poll for new events every 5s
+  // Sync from SSE when no filters are active
   useEffect(() => {
-    const interval = setInterval(() => fetchEvents(), 5000);
-    return () => clearInterval(interval);
-  }, [fetchEvents]);
+    if (!hasFilters && live.activity.length > 0) {
+      setEvents(live.activity as ActivityEvent[]);
+      setLoading(false);
+    }
+  }, [live.activity, hasFilters]);
+
+  // Sync agents from live data for filter dropdown
+  useEffect(() => {
+    if (live.agents.length > 0) {
+      setAgents(live.agents as unknown as Agent[]);
+    }
+  }, [live.agents]);
+
+  // Mark loading done when connected
+  useEffect(() => {
+    if (live.connected && loading && !hasFilters) setLoading(false);
+  }, [live.connected, loading, hasFilters]);
 
   function handleLoadMore() {
     if (events.length === 0) return;

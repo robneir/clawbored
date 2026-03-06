@@ -22,20 +22,15 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
+import { useGateway } from "@/components/gateway-provider";
+import { useLive } from "@/components/live-provider";
+
 interface Agent {
   id: string;
   displayName: string;
   template: string;
   status: string;
   avatar?: string;
-}
-
-interface Gateway {
-  port: number;
-  status: string;
-  live?: boolean;
-  deployId?: string | null;
-  profileName?: string;
 }
 
 interface ChatAttachment {
@@ -127,9 +122,11 @@ function ChatPage() {
   const searchParams = useSearchParams();
   const agentParam = searchParams.get("agent");
   const scrollToTimestamp = searchParams.get("t");
+  const { gateway } = useGateway();
+  const live = useLive();
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [gateway, setGateway] = useState<Gateway | null>(null);
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
+  const activeAgentRef = useRef<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -146,55 +143,64 @@ function ChatPage() {
   const agentSelectedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollToRef = useRef<string | null>(scrollToTimestamp);
+  const scrollBehaviorRef = useRef<ScrollBehavior>("auto");
 
-  // Fetch agents + gateway
+  // Re-process searchParams when they change (e.g., notification click while already on /chat)
+  const lastAppliedParams = useRef<string>("");
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 3000);
-    return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const paramKey = `${agentParam || ""}:${scrollToTimestamp || ""}`;
+    if (paramKey === lastAppliedParams.current) return;
+    lastAppliedParams.current = paramKey;
 
-  async function fetchData() {
-    try {
-      const [agentsRes, gwRes] = await Promise.all([
-        fetch("/api/agents"),
-        fetch("/api/gateway"),
-      ]);
-      let gwData: Gateway | null = null;
-      if (gwRes.ok) {
-        gwData = await gwRes.json();
-        setGateway(gwData);
+    // If we already have agents loaded, handle the param change immediately
+    if (agentSelectedRef.current && agents.length > 0) {
+      const needsSwitch = agentParam && agentParam !== activeAgentRef.current;
+      if (needsSwitch) {
+        const target = agents.find((a) => a.id === agentParam);
+        if (target) switchAgent(target.id);
       }
-      if (agentsRes.ok) {
-        const data = await agentsRes.json();
-        setAgents(data);
-        // Fetch previews once on first load
-        if (!previewsFetched.current && data.length > 0) {
-          previewsFetched.current = true;
-          fetchPreviews(data.map((a: Agent) => a.id));
-        }
-        // Auto-select agent only on the very first load
-        if (!agentSelectedRef.current && data.length > 0) {
-          agentSelectedRef.current = true;
-          const target = agentParam
-            ? data.find((a: Agent) => a.id === agentParam)
-            : null;
-          const selected = target || data[0];
-          setActiveAgent(selected.id);
-          loadHistory(selected.id);
-          // Mark as read
-          if (gwData?.profileName) {
-            fetch("/api/notifications", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ profileName: gwData.profileName, agentId: selected.id }),
-            }).catch(() => {});
-          }
+      if (scrollToTimestamp) {
+        scrollToRef.current = scrollToTimestamp;
+        if (!needsSwitch) {
+          setMessages((prev) => [...prev]);
         }
       }
-    } catch {}
-  }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentParam, scrollToTimestamp]);
+
+  // Sync agents from SSE live data
+  useEffect(() => {
+    if (live.agents.length > 0) {
+      const data = live.agents as unknown as Agent[];
+      setAgents(data);
+      // Fetch previews once on first load
+      if (!previewsFetched.current && data.length > 0) {
+        previewsFetched.current = true;
+        fetchPreviews(data.map((a) => a.id));
+      }
+      // Auto-select agent only on the very first load
+      if (!agentSelectedRef.current && data.length > 0) {
+        agentSelectedRef.current = true;
+        const target = agentParam
+          ? data.find((a) => a.id === agentParam)
+          : null;
+        const selected = target || data[0];
+        setActiveAgent(selected.id);
+        activeAgentRef.current = selected.id;
+        loadHistory(selected.id);
+        // Mark as read
+        if (gateway?.profileName) {
+          fetch("/api/notifications", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ profileName: gateway.profileName, agentId: selected.id }),
+          }).catch(() => {});
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.agents]);
 
   const gwLive = gateway?.live ?? false;
   const gwDeploying = gateway?.status === "setup" && !!gateway?.deployId;
@@ -209,12 +215,9 @@ function ChatPage() {
     }).catch(() => {});
   }, [activeAgent, gateway?.profileName]);
 
-  // Periodically mark as read while viewing (catches incoming messages)
-  useEffect(() => {
-    if (!activeAgent || !gateway?.profileName) return;
-    const interval = setInterval(markActiveAgentRead, 5000);
-    return () => clearInterval(interval);
-  }, [activeAgent, gateway?.profileName, markActiveAgentRead]);
+  // markActiveAgentRead is called at the right moments:
+  // - initial agent selection, switchAgent, and stream completion.
+  // No periodic interval — it was suppressing notification events.
 
   async function loadHistory(agentId: string) {
     if (historyLoaded.has(agentId)) {
@@ -236,17 +239,19 @@ function ChatPage() {
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
           conversationStore.set(agentId, data.messages);
-          setMessages((prev) => {
-            if (prev.length === 0) return data.messages;
-            return prev;
-          });
+          // Only update React state if user is still viewing this agent
+          if (activeAgentRef.current === agentId) {
+            setMessages(data.messages);
+          }
         }
       }
     } catch {
       // Silent failure — no history available
     } finally {
       historyLoaded.add(agentId);
-      setLoadingHistory(false);
+      if (activeAgentRef.current === agentId) {
+        setLoadingHistory(false);
+      }
     }
   }
 
@@ -271,46 +276,47 @@ function ChatPage() {
       scrollToRef.current = null; // only scroll once
 
       if (!isNaN(targetTs)) {
-        // Find the closest assistant message at or before the notification timestamp.
-        // Notifications fire when we detect new session activity, so the agent's
-        // response timestamp is at or just before the notification timestamp.
+        // Find the closest assistant message to the notification timestamp.
+        // The notification timestamp comes from the session file's updatedAt,
+        // which may differ from the client-side message timestamp. Use the
+        // closest match (any role, prefer assistant) with a generous window.
         let best: ChatMessage | null = null;
         let bestDiff = Infinity;
+
+        // First pass: closest assistant message (any direction)
         for (const msg of messages) {
           if (msg.role !== "assistant") continue;
-          const diff = targetTs - msg.timestamp;
-          // Prefer messages at or just before the notification time
-          if (diff >= 0 && diff < bestDiff) {
+          const diff = Math.abs(msg.timestamp - targetTs);
+          if (diff < bestDiff) {
             best = msg;
             bestDiff = diff;
           }
         }
-        // Fallback: if nothing found before, take the closest after
+
+        // Fallback: just use the last assistant message
         if (!best) {
-          for (const msg of messages) {
-            if (msg.role !== "assistant") continue;
-            const diff = Math.abs(msg.timestamp - targetTs);
-            if (diff < bestDiff) {
-              best = msg;
-              bestDiff = diff;
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === "assistant") {
+              best = messages[i];
+              break;
             }
           }
         }
 
         if (best) {
           setHighlightedMsgId(best.id);
-          // Scroll to the element after a brief delay for render
-          setTimeout(() => {
+          // Use requestAnimationFrame to ensure DOM has rendered, then instant-jump
+          requestAnimationFrame(() => {
             const el = document.getElementById(`msg-${best!.id}`);
-            el?.scrollIntoView({ behavior: "smooth", block: "center" });
-          }, 150);
-          // Clear highlight after animation
+            el?.scrollIntoView({ behavior: "auto", block: "center" });
+          });
           setTimeout(() => setHighlightedMsgId(null), 3000);
           return;
         }
       }
     }
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: scrollBehaviorRef.current });
+    scrollBehaviorRef.current = "auto"; // reset after scroll
   }, [messages]);
 
   // Auto-focus input when active agent is set or changes
@@ -321,15 +327,17 @@ function ChatPage() {
   }, [activeAgent, gwLive]);
 
   function switchAgent(agentId: string) {
-    // Save current conversation
-    if (activeAgent) {
-      conversationStore.set(activeAgent, messages);
-    }
+    if (agentId === activeAgentRef.current) return; // already viewing this agent
+    // Store is already kept in sync by updateMessages on every mutation —
+    // don't overwrite with potentially stale React state here.
     // Reset streaming state — old agent's stream finishes in background
     setIsStreaming(false);
     abortRef.current = null;
     setActiveAgent(agentId);
+    activeAgentRef.current = agentId;
     setInput("");
+    // Clear messages immediately so old agent's chat doesn't flash
+    setMessages(conversationStore.get(agentId) || []);
     loadHistory(agentId);
     setTimeout(() => inputRef.current?.focus(), 100);
     // Mark as read
@@ -352,13 +360,16 @@ function ChatPage() {
       messageQueues.set(agentId, queue);
 
       const updateMessages = (updater: (msgs: ChatMessage[]) => ChatMessage[]) => {
-        if (activeAgent === agentId) {
+        // Use ref (not stale closure) to check if user is still viewing this agent
+        if (activeAgentRef.current === agentId) {
+          scrollBehaviorRef.current = "smooth";
           setMessages((prev) => {
             const updated = updater(prev);
             conversationStore.set(agentId, updated);
             return updated;
           });
         } else {
+          // User switched away — update store only (not React state)
           const stored = conversationStore.get(agentId) || [];
           conversationStore.set(agentId, updater(stored));
         }
@@ -381,7 +392,7 @@ function ChatPage() {
         }
       }
     },
-    [activeAgent]
+    [] // activeAgentRef is used instead of activeAgent state to avoid stale closures
   );
 
   async function sendToAgent(
@@ -715,6 +726,7 @@ function ChatPage() {
     };
 
     const newMessages = [...messages, userMsg];
+    scrollBehaviorRef.current = "smooth";
     setMessages(newMessages);
     conversationStore.set(agentId, newMessages);
 
@@ -766,13 +778,16 @@ function ChatPage() {
       processingSet.add(agentId);
 
       const updateMessages = (updater: (msgs: ChatMessage[]) => ChatMessage[]) => {
-        if (activeAgent === agentId) {
+        // Use ref (not stale closure) to check if user is still viewing this agent
+        if (activeAgentRef.current === agentId) {
+          scrollBehaviorRef.current = "smooth";
           setMessages((prev) => {
             const updated = updater(prev);
             conversationStore.set(agentId, updated);
             return updated;
           });
         } else {
+          // User switched away — update store only (not React state)
           const stored = conversationStore.get(agentId) || [];
           conversationStore.set(agentId, updater(stored));
         }
@@ -1283,7 +1298,7 @@ function MessageBubble({ message, highlighted = false }: { message: ChatMessage;
           style={{
             backgroundColor: isUser
               ? isQueued
-                ? "rgba(99, 102, 241, 0.15)"
+                ? "var(--mc-surface)"
                 : "var(--mc-accent)"
               : "var(--mc-surface)",
             color: isUser

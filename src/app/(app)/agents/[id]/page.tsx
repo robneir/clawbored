@@ -251,7 +251,7 @@ export default function AgentDetailPage({
                     className="gap-2 rounded-xl"
                     style={{
                       color: "var(--mc-accent)",
-                      border: "1px solid rgba(99, 102, 241, 0.2)",
+                      border: "1px solid var(--mc-border)",
                     }}
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
@@ -443,7 +443,7 @@ export default function AgentDetailPage({
                   className="gap-2 rounded-xl text-sm"
                   style={{
                     color: soulDirty ? "var(--mc-accent)" : "var(--mc-muted)",
-                    border: `1px solid ${soulDirty ? "rgba(99, 102, 241, 0.3)" : "var(--mc-border)"}`,
+                    border: `1px solid var(--mc-border)`,
                   }}
                 >
                   {saving ? (

@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Bell, MessageSquare, AlertCircle, Wifi, X } from "lucide-react";
+import { useLive } from "./live-provider";
 
 interface NotificationEvent {
   id: string;
@@ -19,12 +20,30 @@ interface NotificationEvent {
 
 export function NotificationBell() {
   const router = useRouter();
+  const live = useLive();
   const [events, setEvents] = useState<NotificationEvent[]>([]);
   const [undismissedCount, setUndismissedCount] = useState(0);
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const initialFetched = useRef(false);
 
-  const fetchNotifications = useCallback(async () => {
+  // Initial fetch of full notification events (SSE only has summary)
+  useEffect(() => {
+    if (!initialFetched.current) {
+      initialFetched.current = true;
+      fetchNotifications();
+    }
+  }, []);
+
+  // Re-fetch full events when SSE notification summary changes
+  useEffect(() => {
+    if (live.notifications) {
+      // SSE gives us the count — re-fetch the full events list
+      fetchNotifications();
+    }
+  }, [live.notifications]);
+
+  async function fetchNotifications() {
     try {
       const res = await fetch("/api/notifications");
       if (res.ok) {
@@ -33,13 +52,7 @@ export function NotificationBell() {
         setUndismissedCount(data.undismissedCount || 0);
       }
     } catch {}
-  }, []);
-
-  useEffect(() => {
-    fetchNotifications();
-    const interval = setInterval(fetchNotifications, 10000);
-    return () => clearInterval(interval);
-  }, [fetchNotifications]);
+  }
 
   // Close on outside click
   useEffect(() => {
@@ -54,24 +67,25 @@ export function NotificationBell() {
   }, [open]);
 
   async function handleDismiss(eventId: string) {
-    // Optimistic update
-    setEvents((prev) => prev.map((e) => (e.id === eventId ? { ...e, dismissed: true } : e)));
-    setUndismissedCount((prev) => Math.max(0, prev - 1));
-    await fetch("/api/notifications", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "dismiss", eventId }),
-    }).catch(() => {});
+    try {
+      await fetch("/api/notifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "dismiss", eventId }),
+      });
+    } catch {}
+    fetchNotifications();
   }
 
   async function handleDismissAll() {
-    setEvents((prev) => prev.map((e) => ({ ...e, dismissed: true })));
-    setUndismissedCount(0);
-    await fetch("/api/notifications", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "dismissAll" }),
-    }).catch(() => {});
+    try {
+      await fetch("/api/notifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "dismissAll" }),
+      });
+    } catch {}
+    fetchNotifications();
   }
 
   function handleEventClick(event: NotificationEvent) {

@@ -138,8 +138,8 @@ export function CloneAgentDialog({
                 <div
                   className="mx-auto w-12 h-12 rounded-full flex items-center justify-center mb-2"
                   style={{
-                    backgroundColor: "rgba(99, 102, 241, 0.1)",
-                    border: "1px solid rgba(99, 102, 241, 0.2)",
+                    backgroundColor: "var(--mc-surface)",
+                    border: "1px solid var(--mc-border)",
                   }}
                 >
                   <Copy className="w-5 h-5" style={{ color: "var(--mc-accent)" }} />
@@ -222,7 +222,7 @@ export function CloneAgentDialog({
                 <div
                   className="w-10 h-10 border-2 rounded-full animate-spin"
                   style={{
-                    borderColor: "rgba(99, 102, 241, 0.2)",
+                    borderColor: "var(--mc-border)",
                     borderTopColor: "var(--mc-accent)",
                   }}
                 />
@@ -253,8 +253,8 @@ export function CloneAgentDialog({
                         style={
                           isActive
                             ? {
-                                backgroundColor: "rgba(99, 102, 241, 0.1)",
-                                borderColor: "rgba(99, 102, 241, 0.3)",
+                                backgroundColor: "var(--mc-surface)",
+                                borderColor: "var(--mc-border)",
                               }
                             : !isDone
                             ? {
@@ -270,7 +270,7 @@ export function CloneAgentDialog({
                           <div
                             className="w-2 h-2 border rounded-full animate-spin"
                             style={{
-                              borderColor: "rgba(99, 102, 241, 0.4)",
+                              borderColor: "var(--mc-border)",
                               borderTopColor: "var(--mc-accent)",
                             }}
                           />

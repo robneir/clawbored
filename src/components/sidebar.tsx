@@ -21,6 +21,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useGateway } from "./gateway-provider";
+import { useLive } from "./live-provider";
 
 interface Agent {
   id: string;
@@ -77,6 +78,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { gateway, triggerTransition, clearTransition, refresh: refreshGateway } = useGateway();
+  const live = useLive();
   const [collapsed, setCollapsed] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [profiles, setProfiles] = useState<DetectedProfile[]>([]);
@@ -85,11 +87,19 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   const [unreads, setUnreads] = useState<UnreadSummary | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
+  // Sync agents from SSE live data
   useEffect(() => {
-    fetchAgents();
-    const interval = setInterval(fetchAgents, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    if (live.agents.length > 0) {
+      setAgents(live.agents);
+    }
+  }, [live.agents]);
+
+  // Sync notifications from SSE live data
+  useEffect(() => {
+    if (live.notifications) {
+      setUnreads(live.notifications);
+    }
+  }, [live.notifications]);
 
   // Listen for instant busy state updates from the chat page
   useEffect(() => {
@@ -111,14 +121,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
-  async function fetchAgents() {
-    try {
-      const res = await fetch("/api/agents");
-      if (res.ok) setAgents(await res.json());
-    } catch {}
-  }
-
-  // Fetch profiles periodically
+  // Fetch profiles (still polled — not in SSE stream)
   const fetchProfiles = useCallback(async () => {
     try {
       const res = await fetch("/api/gateway/profiles");
@@ -132,28 +135,15 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
     return () => clearInterval(interval);
   }, [fetchProfiles]);
 
-  // Fetch unread notification status
-  const fetchUnreads = useCallback(async () => {
-    try {
-      const res = await fetch("/api/notifications");
-      if (res.ok) setUnreads(await res.json());
-    } catch {}
-  }, []);
-
-  useEffect(() => {
-    fetchUnreads();
-    const interval = setInterval(fetchUnreads, 10000);
-    return () => clearInterval(interval);
-  }, [fetchUnreads]);
-
-  function markAgentRead(agentId: string) {
+  async function markAgentRead(agentId: string) {
     if (!activeProfile) return;
-    fetch("/api/notifications", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profileName: activeProfile.name, agentId }),
-    }).catch(() => {});
-    setTimeout(fetchUnreads, 500);
+    try {
+      await fetch("/api/notifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profileName: activeProfile.name, agentId }),
+      });
+    } catch {}
   }
 
   // Close dropdown on click outside
@@ -186,8 +176,8 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
         body: JSON.stringify({ profileDir: dir }),
       });
       if (res.ok) {
-        await Promise.all([fetchProfiles(), fetchAgents()]);
         refreshGateway();
+        fetchProfiles(); // background — don't block UI
       }
     } catch {}
     setSwitchingProfile(null);
@@ -203,7 +193,6 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
         body: JSON.stringify({ profileDir: dir }),
       });
       fetchProfiles();
-      fetchAgents();
     } catch {}
   }
 

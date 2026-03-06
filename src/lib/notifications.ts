@@ -204,19 +204,34 @@ export function detectAndAppendEvents(): NotificationEvent[] {
       const lastPoll = state.lastPollState[key] || 0;
       const lastRead = state.lastRead[key] || 0;
 
-      // New activity: session updated since last poll AND since last read
-      if (currentUpdatedAt > lastPoll && currentUpdatedAt > lastRead) {
-        newEvents.push({
-          id: crypto.randomUUID(),
-          type: "message",
-          profileName: profile.name,
-          agentId: agent.id,
-          agentName: agent.id,
-          title: "New response",
-          preview: `${profile.name} / ${agent.id}`,
-          timestamp: currentUpdatedAt,
-          dismissed: false,
-        });
+      // New activity: session updated since last poll (skip first poll to avoid flood)
+      if (currentUpdatedAt > lastPoll && lastPoll > 0) {
+        // Deduplicate: skip if there's already an undismissed event for this agent
+        // within the last 60 seconds (avoids duplicates during long streaming responses
+        // where session updatedAt advances multiple times)
+        const recentCutoff = Date.now() - 60_000;
+        const alreadyNotified = state.events.some(
+          (e) =>
+            e.type === "message" &&
+            e.agentId === agent.id &&
+            e.profileName === profile.name &&
+            !e.dismissed &&
+            e.timestamp > recentCutoff,
+        );
+
+        if (!alreadyNotified) {
+          newEvents.push({
+            id: crypto.randomUUID(),
+            type: "message",
+            profileName: profile.name,
+            agentId: agent.id,
+            agentName: agent.id,
+            title: "New response",
+            preview: `${profile.name} / ${agent.id}`,
+            timestamp: currentUpdatedAt,
+            dismissed: false,
+          });
+        }
       }
 
       // Always update lastPollState to current value

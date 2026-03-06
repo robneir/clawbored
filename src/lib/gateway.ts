@@ -203,7 +203,7 @@ export async function checkGatewayAlive(port?: number): Promise<boolean> {
   const p = port || 19100;
   try {
     const resp = await fetch(`http://127.0.0.1:${p}/`, {
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(500),
     });
     return resp.status < 500;
   } catch {
@@ -296,10 +296,10 @@ export async function startGateway(): Promise<Gateway> {
     await updateGateway({ pid: child.pid || null });
   }
 
-  // Wait for gateway to be ready
+  // Wait for gateway to be ready (poll quickly — localhost is fast)
   let live = false;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    await new Promise((r) => setTimeout(r, 2000));
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await new Promise((r) => setTimeout(r, 750));
     live = await checkGatewayAlive(gw.port);
     if (live) break;
   }
@@ -438,8 +438,9 @@ export interface DetectedProfile {
  * Returns all ~/.openclaw-* named profile directories that contain openclaw.json.
  */
 export async function detectProfiles(): Promise<DetectedProfile[]> {
-  const gw = await getGateway().catch(() => null);
-  const activeDir = gw?.profileDir || "";
+  // Use state directly — avoid getGateway() which does a health check
+  const gwState = getGatewayState();
+  const activeDir = gwState.profileDir || "";
 
   let entries: string[];
   try {
@@ -453,7 +454,14 @@ export async function detectProfiles(): Promise<DetectedProfile[]> {
     (e) => e.startsWith(".openclaw-")
   );
 
-  const profiles: DetectedProfile[] = [];
+  // Collect profile metadata from disk (no network calls)
+  const profileData: Array<{
+    name: string;
+    dir: string;
+    port: number | null;
+    hasToken: boolean;
+    agentCount: number;
+  }> = [];
 
   for (const entry of candidates) {
     const dir = join(HOME, entry);
@@ -468,24 +476,22 @@ export async function detectProfiles(): Promise<DetectedProfile[]> {
       const agentCount = (config?.agents?.list || []).length;
       const name = entry.replace(/^\.openclaw-/, "");
 
-      let isRunning = false;
-      if (port) {
-        isRunning = await checkGatewayAlive(port);
-      }
-
-      profiles.push({
-        name,
-        dir,
-        port,
-        hasToken,
-        agentCount,
-        isRunning,
-        isActive: dir === activeDir,
-      });
+      profileData.push({ name, dir, port, hasToken, agentCount });
     } catch {
       // Malformed config or permission error — skip
     }
   }
+
+  // Health-check all profiles in parallel (not sequential)
+  const healthResults = await Promise.all(
+    profileData.map((p) => (p.port ? checkGatewayAlive(p.port) : Promise.resolve(false)))
+  );
+
+  const profiles: DetectedProfile[] = profileData.map((p, i) => ({
+    ...p,
+    isRunning: healthResults[i],
+    isActive: p.dir === activeDir,
+  }));
 
   // Sort: active first, then running, then alphabetical
   profiles.sort((a, b) => {
@@ -516,9 +522,9 @@ export async function switchProfile(profileDir: string): Promise<Gateway> {
   const port = config?.gateway?.port ?? config?.gateway?.bind?.port ?? 19100;
   const token = config?.gateway?.auth?.token ?? config?.gateway?.token ?? null;
 
-  // Stop current gateway if running on a different port
-  const currentGw = await getGateway().catch(() => null);
-  if (currentGw && currentGw.status !== "not_setup" && currentGw.profileDir !== profileDir) {
+  // Stop current gateway if running on a different profile
+  const currentState = getGatewayState();
+  if (currentState.status !== "not_setup" && currentState.profileDir !== profileDir) {
     try { await stopGateway(); } catch {}
   }
 
@@ -565,7 +571,9 @@ export async function switchProfile(profileDir: string): Promise<Gateway> {
   // Clean up ghost ~/.openclaw/ dir that CLI commands create as a side-effect
   cleanupGhostDirs();
 
-  return getGateway();
+  // Return directly — avoid another getGateway() health check round-trip
+  const finalState = getGatewayState();
+  return { ...finalState, live } as Gateway;
 }
 
 /**

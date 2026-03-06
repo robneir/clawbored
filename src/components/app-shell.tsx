@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Sidebar } from "./sidebar";
 import { Toaster } from "sonner";
 import { GatewayProvider, useGateway } from "./gateway-provider";
+import { LiveProvider } from "./live-provider";
 import { SetupWizard } from "./setup-wizard";
 import { InstallStatusBar } from "./install-status-bar";
 import { NotificationBell } from "./notification-bell";
@@ -114,10 +115,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           position="top-right"
           toastOptions={{
             style: {
-              backgroundColor: "#18181b",
-              borderColor: "rgba(255, 255, 255, 0.1)",
-              color: "#fafafa",
-              border: "1px solid rgba(255, 255, 255, 0.1)",
+              backgroundColor: "var(--mc-sidebar)",
+              borderColor: "var(--mc-border)",
+              color: "var(--mc-text)",
+              border: "1px solid var(--mc-border)",
               fontSize: "13px",
             },
             classNames: {
@@ -146,10 +147,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           position="top-right"
           toastOptions={{
             style: {
-              backgroundColor: "#18181b",
-              borderColor: "rgba(255, 255, 255, 0.1)",
-              color: "#fafafa",
-              border: "1px solid rgba(255, 255, 255, 0.1)",
+              backgroundColor: "var(--mc-sidebar)",
+              borderColor: "var(--mc-border)",
+              color: "var(--mc-text)",
+              border: "1px solid var(--mc-border)",
               fontSize: "13px",
             },
             classNames: {
@@ -198,10 +199,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
         position="top-right"
         toastOptions={{
           style: {
-            backgroundColor: "#18181b",
-            borderColor: "rgba(255, 255, 255, 0.1)",
-            color: "#fafafa",
-            border: "1px solid rgba(255, 255, 255, 0.1)",
+            backgroundColor: "var(--mc-sidebar)",
+            borderColor: "var(--mc-border)",
+            color: "var(--mc-text)",
+            border: "1px solid var(--mc-border)",
             fontSize: "13px",
           },
           classNames: {
@@ -263,8 +264,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
-    <GatewayProvider>
-      <AppShellInner>{children}</AppShellInner>
-    </GatewayProvider>
+    <LiveProvider>
+      <GatewayProvider>
+        <AppShellInner>{children}</AppShellInner>
+      </GatewayProvider>
+    </LiveProvider>
   );
 }

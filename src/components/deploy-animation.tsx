@@ -261,11 +261,11 @@ export function DeployAnimation({
                 )}
                 style={
                   isDone
-                    ? { backgroundColor: "rgba(99, 102, 241, 0.15)" }
+                    ? { backgroundColor: "var(--mc-surface)" }
                     : isActive
                     ? {
-                        backgroundColor: "rgba(99, 102, 241, 0.05)",
-                        borderColor: "rgba(99, 102, 241, 0.4)",
+                        backgroundColor: "var(--mc-surface)",
+                        borderColor: "var(--mc-border)",
                       }
                     : !isFailed
                     ? {

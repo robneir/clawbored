@@ -26,8 +26,8 @@ export function SetupGate() {
           transition={{ delay: 0.1, type: "spring", stiffness: 200, damping: 20 }}
           className="w-20 h-20 rounded-2xl mx-auto mb-8 flex items-center justify-center"
           style={{
-            backgroundColor: "rgba(99, 102, 241, 0.08)",
-            border: "1px solid rgba(99, 102, 241, 0.15)",
+            backgroundColor: "var(--mc-surface)",
+            border: "1px solid var(--mc-border)",
           }}
         >
           <Rocket className="w-10 h-10" style={{ color: "var(--mc-accent)", opacity: 0.8 }} />
