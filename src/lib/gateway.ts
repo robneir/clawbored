@@ -517,6 +517,37 @@ export async function detectProfiles(): Promise<DetectedProfile[]> {
 }
 
 /**
+ * Find the next available port starting from 19100 that isn't used by any profile.
+ */
+export function getNextAvailablePort(): number {
+  const usedPorts = new Set<number>();
+
+  let entries: string[];
+  try {
+    entries = readdirSync(HOME);
+  } catch {
+    return 19100;
+  }
+
+  for (const entry of entries) {
+    if (!entry.startsWith(".openclaw-")) continue;
+    const configPath = join(HOME, entry, "openclaw.json");
+    try {
+      if (!existsSync(configPath)) continue;
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      const port = config?.gateway?.port ?? config?.gateway?.bind?.port;
+      if (port) usedPorts.add(port);
+    } catch {}
+  }
+
+  let port = 19100;
+  while (usedPorts.has(port)) {
+    port++;
+  }
+  return port;
+}
+
+/**
  * Switch the active gateway to a different profile directory.
  *
  * Fast path: just flip the pointer and check if the new gateway is already alive.
@@ -582,19 +613,45 @@ export async function switchProfile(profileDir: string): Promise<Gateway> {
 
 /**
  * Delete a profile from disk. If it's the active profile, switch to another
- * available profile or disconnect cleanly.
+ * available profile first (so the state never transiently shows "not_setup"),
+ * then clean up the old profile's files.
  */
 export async function deleteProfile(profileDir: string): Promise<void> {
-  const gw = await getGateway().catch(() => null);
-  const isActive = gw && gw.profileDir === profileDir;
+  // Use getGatewayState() instead of getGateway() — avoids a slow health check
+  const gwState = getGatewayState();
+  const isActive = gwState.profileDir === profileDir;
 
-  // Derive profile name from the directory path — works even if openclaw.json is missing
+  // Derive profile name from the directory path
   const dirName = basename(profileDir);
   const profileName = dirName.startsWith(".openclaw-")
     ? dirName.replace(/^\.openclaw-/, "")
     : "";
 
-  // Kill gateway processes on the profile's port
+  // If this is the active profile, switch to another one FIRST
+  // so the gateway state is never transiently "not_setup" (which triggers the wizard)
+  if (isActive) {
+    // Detect remaining profiles (excluding the one being deleted)
+    const all = await detectProfiles();
+    const remaining = all.filter((p) => p.dir !== profileDir);
+    if (remaining.length > 0) {
+      await switchProfile(remaining[0].dir);
+    } else {
+      // No other profiles — reset to not_setup
+      updateGatewayState({
+        port: 19100,
+        token: null,
+        profileDir: "",
+        profileName: "",
+        pid: null,
+        status: "not_setup",
+        setupAt: null,
+        deployId: null,
+        displayName: "",
+      });
+    }
+  }
+
+  // Now clean up the old profile (kill processes, nuke launchd, delete files)
   try {
     const configPath = join(profileDir, "openclaw.json");
     if (existsSync(configPath)) {
@@ -604,22 +661,8 @@ export async function deleteProfile(profileDir: string): Promise<void> {
     }
   } catch {}
 
-  // CRITICAL: Unload and delete the launchd plist BEFORE deleting files.
-  // If we don't, macOS will keep restarting the service and recreating the directory.
   nukelaunchdService(profileName);
-
-  // Delete the directory with retry to handle launchd respawn race
   await deleteDirectoryWithRetry(profileDir);
-
-  // If this was the active profile, try to switch to another one
-  if (isActive) {
-    const remaining = await detectProfiles();
-    if (remaining.length > 0) {
-      await switchProfile(remaining[0].dir);
-    } else {
-      await disconnectGateway();
-    }
-  }
 }
 
 /**

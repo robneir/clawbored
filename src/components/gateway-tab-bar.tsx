@@ -34,7 +34,10 @@ export function GatewayTabBar() {
   const fetchProfiles = useCallback(async () => {
     try {
       const res = await fetch("/api/gateway/profiles");
-      if (res.ok) setProfiles(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setProfiles(data.profiles || data);
+      }
     } catch {}
   }, []);
 

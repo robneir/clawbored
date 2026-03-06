@@ -40,7 +40,6 @@ function writeConfig(profileDir: string, config: any) {
 export interface TelegramConfig {
   enabled: boolean;
   botToken?: string;
-  botUsername?: string;
 }
 
 export function getTelegramConfig(profileDir: string): TelegramConfig | null {
@@ -49,7 +48,6 @@ export function getTelegramConfig(profileDir: string): TelegramConfig | null {
   return {
     enabled: config.channels.telegram.enabled !== false,
     botToken: config.channels.telegram.botToken,
-    botUsername: config.channels.telegram.botUsername,
   };
 }
 
@@ -66,12 +64,7 @@ export function enableTelegram(profileDir: string, botToken: string, botUsername
     botToken,
     dmPolicy: "open",
     allowFrom: ["*"],
-    sendReadReceipts: true,
   };
-
-  if (botUsername) {
-    config.channels.telegram.botUsername = botUsername;
-  }
 
   // Enable Telegram plugin
   if (!config.plugins) config.plugins = {};

@@ -1,5 +1,71 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGateway } from "@/lib/gateway";
+import { getAgent, updateAgent } from "@/lib/agents";
+import { CURATED_MODELS } from "@/lib/models";
+import { listProviderKeysRaw } from "@/lib/provider-keys";
+
+type ProviderId = "anthropic" | "openai";
+
+function isRateLimitError(status: number, text: string): boolean {
+  if (status === 429) return true;
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("rate limit") ||
+    lower.includes("rate_limit") ||
+    lower.includes("too many requests") ||
+    lower.includes("throttle")
+  );
+}
+
+function inferProviderFromModel(model?: string): ProviderId | null {
+  if (!model || model === "default") return null;
+  const lower = model.toLowerCase();
+  if (lower.startsWith("claude-")) return "anthropic";
+  if (
+    lower.startsWith("gpt-") ||
+    lower.startsWith("o1") ||
+    lower.startsWith("o3") ||
+    lower.startsWith("o4") ||
+    lower.startsWith("chatgpt-")
+  ) {
+    return "openai";
+  }
+  return null;
+}
+
+function inferProviderFromError(text: string): ProviderId | null {
+  const lower = text.toLowerCase();
+  if (lower.includes("anthropic") || lower.includes("claude")) return "anthropic";
+  if (lower.includes("openai") || lower.includes("gpt") || lower.includes("codex")) return "openai";
+  return null;
+}
+
+function pickFallbackModel(
+  failedProvider: ProviderId | null,
+  connectedProviders: Set<string>
+): { provider: ProviderId; modelId: string } | null {
+  const providerOrder: ProviderId[] = failedProvider === "openai" ? ["anthropic", "openai"] : ["openai", "anthropic"];
+
+  for (const provider of providerOrder) {
+    if (provider === failedProvider) continue;
+    if (!connectedProviders.has(provider)) continue;
+
+    if (provider === "openai") {
+      const preferred = CURATED_MODELS.find((m) => m.id === "gpt-4o");
+      if (preferred) return { provider, modelId: preferred.id };
+    }
+
+    if (provider === "anthropic") {
+      const preferred = CURATED_MODELS.find((m) => m.id === "claude-sonnet-4-6");
+      if (preferred) return { provider, modelId: preferred.id };
+    }
+
+    const fallback = CURATED_MODELS.find((m) => m.provider === provider);
+    if (fallback) return { provider, modelId: fallback.id };
+  }
+
+  return null;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -34,27 +100,76 @@ export async function POST(req: NextRequest) {
     // For non-streaming, 2 minutes is enough for the initial response.
     const timeout = stream ? 600000 : 120000;
 
-    const openclawRes = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${gw.token}`,
-      },
-      body: JSON.stringify({
-        model: `openclaw:${agentId}`,
-        messages,
-        stream,
-        user: `mc-${agentId}`,
-      }),
-      signal: AbortSignal.timeout(timeout),
-    });
+    const makeRequest = () =>
+      fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${gw.token}`,
+        },
+        body: JSON.stringify({
+          model: `openclaw:${agentId}`,
+          messages,
+          stream,
+          user: `mc-${agentId}`,
+        }),
+        signal: AbortSignal.timeout(timeout),
+      });
+
+    let openclawRes = await makeRequest();
+    let fallbackApplied = false;
+    let fallbackTarget = "";
 
     if (!openclawRes.ok) {
       const errText = await openclawRes.text().catch(() => "Unknown error");
-      return NextResponse.json(
-        { error: `OpenClaw error (${openclawRes.status}): ${errText}` },
-        { status: openclawRes.status }
-      );
+      let finalErrText = errText;
+      const shouldTryFallback = isRateLimitError(openclawRes.status, errText);
+
+      if (shouldTryFallback) {
+        let currentModel = "default";
+        let failedProvider = inferProviderFromError(errText);
+
+        try {
+          const agent = await getAgent(agentId);
+          currentModel = agent.model || "default";
+          if (!failedProvider) {
+            failedProvider = inferProviderFromModel(currentModel);
+          }
+        } catch {
+          // Ignore metadata read errors — continue without fallback.
+        }
+
+        const configured = await listProviderKeysRaw().catch(() => []);
+        const connectedProviders = new Set(configured.map((p) => p.provider));
+        const fallback = pickFallbackModel(failedProvider, connectedProviders);
+
+        if (fallback) {
+          try {
+            await updateAgent(agentId, { model: fallback.modelId });
+            fallbackApplied = true;
+            fallbackTarget = fallback.modelId;
+            // Small delay so the gateway picks up the config update before retry.
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            openclawRes = await makeRequest();
+            if (!openclawRes.ok) {
+              finalErrText = await openclawRes.text().catch(() => "Unknown error");
+            }
+          } catch {
+            // If fallback update fails, return the original provider error.
+          }
+        }
+      }
+
+      if (!openclawRes.ok) {
+        return NextResponse.json(
+          {
+            error: fallbackApplied
+              ? `OpenClaw error (${openclawRes.status}): ${finalErrText}. Auto-fallback switched model to '${fallbackTarget}', but the retry still failed.`
+              : `OpenClaw error (${openclawRes.status}): ${finalErrText}`,
+          },
+          { status: openclawRes.status }
+        );
+      }
     }
 
     const contentType = openclawRes.headers.get("content-type") || "";

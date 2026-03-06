@@ -34,6 +34,8 @@ interface ModelSelectorProps {
   value: string;
   onChange: (modelId: string) => void;
   className?: string;
+  connectedOnly?: boolean;
+  includeDefaultOption?: boolean;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -48,7 +50,13 @@ const CATEGORY_COLORS: Record<string, string> = {
   fast: "#22c55e",
 };
 
-export function ModelSelector({ value, onChange, className }: ModelSelectorProps) {
+export function ModelSelector({
+  value,
+  onChange,
+  className,
+  connectedOnly = false,
+  includeDefaultOption = true,
+}: ModelSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<string | null>(null);
@@ -110,6 +118,9 @@ export function ModelSelector({ value, onChange, className }: ModelSelectorProps
   // Filtered groups
   const filteredGroups = useMemo(() => {
     let result = groups;
+    if (connectedOnly) {
+      result = result.filter((g) => g.hasApiKey);
+    }
     if (filter) {
       result = result.filter((g) => g.provider.id === filter);
     }
@@ -128,14 +139,13 @@ export function ModelSelector({ value, onChange, className }: ModelSelectorProps
         .filter((g) => g.models.length > 0);
     }
     return result;
-  }, [groups, search, filter]);
+  }, [groups, search, filter, connectedOnly]);
 
-  const displayValue =
-    value === "default"
-      ? "Default"
-      : selectedModel
-        ? selectedModel.model.name
-        : value || "Select model";
+  const displayValue = selectedModel
+    ? selectedModel.model.name
+    : value === "default"
+      ? "Select model"
+      : value || "Select model";
 
   const SelectedIcon = selectedModel ? PROVIDER_ICON_MAP[selectedModel.provider.id] : null;
 
@@ -251,22 +261,23 @@ export function ModelSelector({ value, onChange, className }: ModelSelectorProps
 
             {/* Model list */}
             <div className="overflow-y-auto" style={{ maxHeight: "280px" }}>
-              {/* Default option */}
-              <button
-                type="button"
-                onClick={() => {
-                  onChange("default");
-                  setOpen(false);
-                }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors hover:bg-white/5"
-                style={{ color: value === "default" ? "var(--mc-text)" : "var(--mc-muted)" }}
-              >
-                <Bot className="w-3.5 h-3.5" />
-                <span className="flex-1">Default (Agent Default)</span>
-                {value === "default" && (
-                  <Check className="w-3.5 h-3.5" style={{ color: "var(--mc-accent)" }} />
-                )}
-              </button>
+              {includeDefaultOption && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChange("default");
+                    setOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors hover:bg-white/5"
+                  style={{ color: value === "default" ? "var(--mc-text)" : "var(--mc-muted)" }}
+                >
+                  <Bot className="w-3.5 h-3.5" />
+                  <span className="flex-1">Default (Agent Default)</span>
+                  {value === "default" && (
+                    <Check className="w-3.5 h-3.5" style={{ color: "var(--mc-accent)" }} />
+                  )}
+                </button>
+              )}
 
               {loading ? (
                 <div className="p-4 text-center text-xs" style={{ color: "var(--mc-muted)" }}>
@@ -304,6 +315,7 @@ export function ModelSelector({ value, onChange, className }: ModelSelectorProps
                         <button
                           key={model.id}
                           type="button"
+                          disabled={!group.hasApiKey}
                           onClick={() => {
                             onChange(model.id);
                             setOpen(false);

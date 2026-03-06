@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { detectProfiles, switchProfile, deleteProfile } from "@/lib/gateway";
+import { detectProfiles, switchProfile, deleteProfile, getNextAvailablePort } from "@/lib/gateway";
 
 /** List all detected OpenClaw profiles on disk. */
 export async function GET() {
   try {
     const profiles = await detectProfiles();
-    return NextResponse.json(profiles);
+    const recommendedPort = getNextAvailablePort();
+    return NextResponse.json({ profiles, recommendedPort });
   } catch (err: unknown) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to detect profiles" },

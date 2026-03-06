@@ -90,6 +90,7 @@ export default function DeployPage() {
   const [phase, setPhase] = useState<DeployPhase>("checking");
   const [instanceName, setInstanceName] = useState("");
   const [instancePort, setInstancePort] = useState("19100");
+  const [showPortEdit, setShowPortEdit] = useState(false);
   const [deployId, setDeployId] = useState<string | null>(null);
   const [navigating, setNavigating] = useState(false);
 
@@ -105,6 +106,13 @@ export default function DeployPage() {
   // so users can create additional instances from the instance dropdown.
   useEffect(() => {
     setPhase("idle");
+    // Fetch recommended port from existing profiles
+    fetch("/api/gateway/profiles")
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => {
+        if (data?.recommendedPort) setInstancePort(String(data.recommendedPort));
+      })
+      .catch(() => {});
   }, []);
 
   // Client-side timeout: if deploying for > 3 minutes, force-fail
@@ -387,27 +395,44 @@ export default function DeployPage() {
                 </p>
 
                 <div className="space-y-2">
-                  <Label
-                    htmlFor="port"
-                    className="text-xs uppercase tracking-wider"
-                    style={{ color: "var(--mc-muted)" }}
-                  >
-                    Port
-                  </Label>
-                  <Input
-                    id="port"
-                    placeholder="19100"
-                    value={instancePort}
-                    onChange={(e) =>
-                      setInstancePort(e.target.value.replace(/[^0-9]/g, ""))
-                    }
-                    className="rounded-xl h-11 text-sm"
-                    style={{
-                      backgroundColor: "var(--mc-surface)",
-                      borderColor: "var(--mc-border)",
-                      color: "var(--mc-text)",
-                    }}
-                  />
+                  {showPortEdit ? (
+                    <>
+                      <Label
+                        htmlFor="port"
+                        className="text-xs uppercase tracking-wider"
+                        style={{ color: "var(--mc-muted)" }}
+                      >
+                        Port
+                      </Label>
+                      <Input
+                        id="port"
+                        placeholder="19100"
+                        value={instancePort}
+                        onChange={(e) =>
+                          setInstancePort(e.target.value.replace(/[^0-9]/g, ""))
+                        }
+                        className="rounded-xl h-11 text-sm"
+                        style={{
+                          backgroundColor: "var(--mc-surface)",
+                          borderColor: "var(--mc-border)",
+                          color: "var(--mc-text)",
+                        }}
+                      />
+                    </>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs" style={{ color: "var(--mc-muted)" }}>
+                        Port: <span style={{ color: "var(--mc-text)" }}>{instancePort}</span>
+                      </span>
+                      <button
+                        onClick={() => setShowPortEdit(true)}
+                        className="text-[10px] underline underline-offset-2"
+                        style={{ color: "var(--mc-muted)" }}
+                      >
+                        Edit
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <Button

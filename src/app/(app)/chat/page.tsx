@@ -19,11 +19,16 @@ import {
   Download,
   Upload,
   Square,
+  Wand2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
+import { AutofixPanel } from "@/components/autofix-panel";
 import { useGateway } from "@/components/gateway-provider";
 import { useLive } from "@/components/live-provider";
+import { ModelSelector } from "@/components/model-selector";
+import { DEFAULT_MODEL } from "@/lib/models";
+import { toast } from "sonner";
 
 interface Agent {
   id: string;
@@ -31,6 +36,7 @@ interface Agent {
   template: string;
   status: string;
   avatar?: string;
+  model?: string;
 }
 
 interface ChatAttachment {
@@ -104,7 +110,7 @@ async function readFileAsText(file: File): Promise<string> {
 // In-memory conversation store (persists across agent switches, keyed by agentId)
 const conversationStore = new Map<string, ChatMessage[]>();
 // Message queue per agent
-const messageQueues = new Map<string, string[]>();
+const messageQueues = new Map<string, Array<{ id: string; content: string }>>();
 // Track which agents are currently processing
 const processingSet = new Set<string>();
 // Track which agents have had their history loaded from disk
@@ -136,6 +142,7 @@ function ChatPage() {
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
+  const [autofixSessionId, setAutofixSessionId] = useState<string | null>(null);
   const previewsFetched = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -171,6 +178,11 @@ function ChatPage() {
 
   // Track the current agent IDs to detect profile switches
   const prevAgentIdsRef = useRef<string>("");
+
+  // Clear history cache on mount — ensures fresh data when navigating to chat
+  useEffect(() => {
+    historyLoaded.clear();
+  }, []);
 
   // Sync agents from SSE live data
   useEffect(() => {
@@ -246,8 +258,13 @@ function ChatPage() {
   async function loadHistory(agentId: string) {
     if (historyLoaded.has(agentId)) {
       // Already loaded — just restore from store
-      setMessages(conversationStore.get(agentId) || []);
-      return;
+      const stored = conversationStore.get(agentId);
+      if (stored && stored.length > 0) {
+        setMessages(stored);
+        return;
+      }
+      // Previously marked loaded but store is empty — retry from API
+      historyLoaded.delete(agentId);
     }
     // Don't overwrite messages from current session
     if (conversationStore.has(agentId) && conversationStore.get(agentId)!.length > 0) {
@@ -263,16 +280,17 @@ function ChatPage() {
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
           conversationStore.set(agentId, data.messages);
-          // Only update React state if user is still viewing this agent
           if (activeAgentRef.current === agentId) {
             setMessages(data.messages);
           }
         }
+        // Mark as loaded only on successful API response (even if empty = new agent)
+        historyLoaded.add(agentId);
       }
+      // Don't mark as loaded on HTTP errors — allow retry
     } catch {
-      // Silent failure — no history available
+      // Network error — don't mark as loaded so next visit retries
     } finally {
-      historyLoaded.add(agentId);
       if (activeAgentRef.current === agentId) {
         setLoadingHistory(false);
       }
@@ -374,6 +392,35 @@ function ChatPage() {
     }
   }
 
+  async function handleAutofix(errorContent: string) {
+    if (autofixSessionId || !activeAgent) return;
+    const recentMessages = messages
+      .filter((m) => m.status !== "error" && m.status !== "queued")
+      .slice(-5)
+      .map((m) => ({ role: m.role, content: m.content.slice(0, 500) }));
+
+    try {
+      const res = await fetch("/api/autofix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentId: activeAgent,
+          errorMessage: errorContent,
+          recentMessages,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        toast.error(err.error || "Failed to start auto-fix");
+        return;
+      }
+      const { sessionId } = await res.json();
+      setAutofixSessionId(sessionId);
+    } catch {
+      toast.error("Failed to start auto-fix");
+    }
+  }
+
   const processQueue = useCallback(
     async (agentId: string) => {
       const queue = messageQueues.get(agentId);
@@ -401,14 +448,14 @@ function ChatPage() {
 
       updateMessages((msgs) =>
         msgs.map((m) =>
-          m.role === "user" && m.content === nextMessage && m.status === "queued"
+          m.id === nextMessage.id && m.role === "user" && m.status === "queued"
             ? { ...m, status: "sending" }
             : m
         )
       );
 
       try {
-        await sendToAgent(agentId, nextMessage, updateMessages);
+        await sendToAgent(agentId, nextMessage.content, updateMessages);
       } finally {
         processingSet.delete(agentId);
         if ((messageQueues.get(agentId)?.length || 0) > 0) {
@@ -803,7 +850,7 @@ function ChatPage() {
 
     if (processingSet.has(agentId)) {
       const queue = messageQueues.get(agentId) || [];
-      queue.push(sendContent);
+      queue.push({ id: msgId, content: sendContent });
       messageQueues.set(agentId, queue);
     } else {
       processingSet.add(agentId);
@@ -864,6 +911,10 @@ function ChatPage() {
   }
 
   const activeAgentData = agents.find((a) => a.id === activeAgent);
+  const activeModelId =
+    !activeAgentData?.model || activeAgentData.model === "default"
+      ? DEFAULT_MODEL
+      : activeAgentData.model;
   const filteredAgents = agents.filter(
     (a) =>
       !searchFilter ||
@@ -874,6 +925,54 @@ function ChatPage() {
   const queuedCount = activeAgent
     ? (messageQueues.get(activeAgent)?.length || 0)
     : 0;
+
+  async function handleModelChange(newModel: string) {
+    if (!activeAgentData) return;
+
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(activeAgentData.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: newModel === "default" ? "" : newModel }),
+      });
+
+      if (!res.ok) throw new Error("Failed to update model");
+
+      const savedModel = newModel === "default" ? "" : newModel;
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === activeAgentData.id ? { ...a, model: savedModel } : a
+        )
+      );
+      toast.success("Model updated");
+    } catch {
+      toast.error("Failed to update model");
+    }
+  }
+
+  function removeQueuedMessage(agentId: string, messageId: string) {
+    const queue = messageQueues.get(agentId) || [];
+    if (queue.length === 0) return;
+
+    const nextQueue = queue.filter((item) => item.id !== messageId);
+    if (nextQueue.length === queue.length) return;
+    messageQueues.set(agentId, nextQueue);
+
+    if (activeAgentRef.current === agentId) {
+      setMessages((prev) => {
+        const updated = prev.filter((m) => m.id !== messageId);
+        conversationStore.set(agentId, updated);
+        return updated;
+      });
+      return;
+    }
+
+    const stored = conversationStore.get(agentId) || [];
+    conversationStore.set(
+      agentId,
+      stored.filter((m) => m.id !== messageId)
+    );
+  }
 
   return (
     <div className="flex h-screen">
@@ -1031,21 +1130,33 @@ function ChatPage() {
           <>
             {/* Chat Header */}
             <div
-              className="px-6 py-3 border-b flex items-center gap-3"
+              className="pl-6 pr-56 py-3 border-b flex items-center justify-between gap-3"
               style={{ borderColor: "var(--mc-border)" }}
             >
-              <Bot className="w-4 h-4" style={{ color: "var(--mc-muted)", opacity: 0.6 }} />
-              <div className="flex-1">
-                <h3 className="text-sm font-semibold">
-                  {activeAgentData.displayName || activeAgentData.id}
-                </h3>
-                <span className="text-[11px]" style={{ color: "var(--mc-muted)" }}>
-                  {gwReady ? `openclaw:${activeAgentData.id}` : gwDeploying ? "Setting up gateway..." : "Connecting..."}
-                </span>
+              <div className="flex items-center gap-3 min-w-0">
+                <Bot className="w-4 h-4 flex-shrink-0" style={{ color: "var(--mc-muted)", opacity: 0.6 }} />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold truncate">
+                      {activeAgentData.displayName || activeAgentData.id}
+                    </h3>
+                    <div className="w-52 flex-shrink-0 self-center">
+                      <ModelSelector
+                        value={activeModelId}
+                        onChange={handleModelChange}
+                        connectedOnly
+                        includeDefaultOption={false}
+                      />
+                    </div>
+                  </div>
+                  <span className="text-[11px]" style={{ color: "var(--mc-muted)" }}>
+                    {gwReady ? `openclaw:${activeAgentData.id}` : gwDeploying ? "Setting up gateway..." : "Connecting..."}
+                  </span>
+                </div>
               </div>
               {queuedCount > 0 && (
                 <div
-                  className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium"
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium flex-shrink-0"
                   style={{
                     backgroundColor: "rgba(234, 179, 8, 0.1)",
                     color: "#eab308",
@@ -1100,9 +1211,21 @@ function ChatPage() {
               ) : (
                 <AnimatePresence initial={false}>
                   {messages.map((msg) => (
-                    <MessageBubble key={msg.id} message={msg} highlighted={msg.id === highlightedMsgId} />
+                    <MessageBubble
+                      key={msg.id}
+                      message={msg}
+                      highlighted={msg.id === highlightedMsgId}
+                      onRemoveQueued={() => removeQueuedMessage(activeAgentData.id, msg.id)}
+                      onAutofix={!autofixSessionId ? handleAutofix : undefined}
+                    />
                   ))}
                 </AnimatePresence>
+              )}
+              {autofixSessionId && (
+                <AutofixPanel
+                  sessionId={autofixSessionId}
+                  onClose={() => setAutofixSessionId(null)}
+                />
               )}
               <div ref={messagesEndRef} />
             </div>
@@ -1259,7 +1382,17 @@ function ChatPage() {
   );
 }
 
-function MessageBubble({ message, highlighted = false }: { message: ChatMessage; highlighted?: boolean }) {
+function MessageBubble({
+  message,
+  highlighted = false,
+  onRemoveQueued,
+  onAutofix,
+}: {
+  message: ChatMessage;
+  highlighted?: boolean;
+  onRemoveQueued?: () => void;
+  onAutofix?: (errorContent: string) => void;
+}) {
   const isUser = message.role === "user";
   const isQueued = message.status === "queued";
   const isError = message.status === "error";
@@ -1350,6 +1483,22 @@ function MessageBubble({ message, highlighted = false }: { message: ChatMessage;
               Queued
             </span>
           )}
+          {isQueued && onRemoveQueued && (
+            <button
+              type="button"
+              onClick={onRemoveQueued}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors hover:opacity-100"
+              style={{
+                border: "1px solid var(--mc-border)",
+                color: "var(--mc-muted)",
+                opacity: 0.8,
+              }}
+              title="Remove from queue"
+            >
+              <X className="w-2.5 h-2.5" />
+              Remove
+            </button>
+          )}
           {message.status === "sending" && (
             <span className="flex items-center gap-1">
               <Loader2 className="w-2.5 h-2.5 animate-spin" />
@@ -1357,10 +1506,22 @@ function MessageBubble({ message, highlighted = false }: { message: ChatMessage;
             </span>
           )}
           {isError && (
-            <span className="flex items-center gap-1 text-red-400">
-              <AlertCircle className="w-2.5 h-2.5" />
-              Failed
-            </span>
+            <>
+              <span className="flex items-center gap-1 text-red-400">
+                <AlertCircle className="w-2.5 h-2.5" />
+                Failed
+              </span>
+              {onAutofix && (
+                <button
+                  onClick={() => onAutofix(message.content)}
+                  className="flex items-center gap-1 text-[10px] ml-1 transition-opacity hover:opacity-80"
+                  style={{ color: "var(--mc-accent)" }}
+                >
+                  <Wand2 className="w-2.5 h-2.5" />
+                  Fix with Claude
+                </button>
+              )}
+            </>
           )}
           {isStreaming && message.content && (
             <span className="flex items-center gap-1" style={{ color: "var(--mc-accent)" }}>

@@ -186,9 +186,13 @@ function getSessionUpdatedAt(profileDir: string, agentId: string): number {
 // ---------------------------------------------------------------------------
 
 const MAX_EVENTS = 50;
+/** Agents are considered "busy" if their session was updated within this window. */
+const BUSY_THRESHOLD_MS = 15_000;
 
 /**
  * Detect new events by comparing current session timestamps against lastPollState.
+ * Only creates notification events once the agent is idle (not busy), so the user
+ * is only notified when the agent needs their input — not on every intermediate message.
  * Appends detected events, updates lastPollState, writes to disk.
  * Returns the full events list.
  */
@@ -196,20 +200,23 @@ export function detectAndAppendEvents(): NotificationEvent[] {
   const state = readNotificationState();
   const profiles = detectProfilesLight();
   const newEvents: NotificationEvent[] = [];
+  const now = Date.now();
 
   for (const profile of profiles) {
     for (const agent of profile.agents) {
       const key = `${profile.name}:${agent.id}`;
       const currentUpdatedAt = getSessionUpdatedAt(profile.dir, agent.id);
       const lastPoll = state.lastPollState[key] || 0;
-      const lastRead = state.lastRead[key] || 0;
+
+      // Agent is busy if session was updated very recently — defer notification
+      const isBusy = currentUpdatedAt > 0 && now - currentUpdatedAt < BUSY_THRESHOLD_MS;
+      if (isBusy) continue; // Don't update lastPollState either — check again next tick
 
       // New activity: session updated since last poll (skip first poll to avoid flood)
       if (currentUpdatedAt > lastPoll && lastPoll > 0) {
         // Deduplicate: skip if there's already an undismissed event for this agent
-        // within the last 60 seconds (avoids duplicates during long streaming responses
-        // where session updatedAt advances multiple times)
-        const recentCutoff = Date.now() - 60_000;
+        // within the last 60 seconds
+        const recentCutoff = now - 60_000;
         const alreadyNotified = state.events.some(
           (e) =>
             e.type === "message" &&
@@ -234,7 +241,7 @@ export function detectAndAppendEvents(): NotificationEvent[] {
         }
       }
 
-      // Always update lastPollState to current value
+      // Only update lastPollState when agent is idle
       state.lastPollState[key] = currentUpdatedAt;
     }
   }
@@ -307,7 +314,10 @@ export function getUnreadSummary(): UnreadSummary {
       const key = `${profile.name}:${agent.id}`;
       const lastRead = notifState.lastRead[key] || 0;
       const updatedAt = getSessionUpdatedAt(profile.dir, agent.id);
-      const hasUnread = updatedAt > 0 && updatedAt > lastRead;
+      // Only mark unread when the agent is idle (not busy) — avoids
+      // notifications while the agent is still working on a response
+      const isBusy = updatedAt > 0 && Date.now() - updatedAt < BUSY_THRESHOLD_MS;
+      const hasUnread = updatedAt > 0 && updatedAt > lastRead && !isBusy;
 
       if (isActive) {
         activeAgents.push({ agentId: agent.id, hasUnread });

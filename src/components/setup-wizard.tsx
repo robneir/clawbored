@@ -544,6 +544,7 @@ export function SetupWizard({ initialStep = "appearance", onComplete }: SetupWiz
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPort, setNewPort] = useState("19100");
+  const [showPortEdit, setShowPortEdit] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [activeDeployId, setActiveDeployId] = useState<string | null>(null);
 
@@ -569,8 +570,10 @@ export function SetupWizard({ initialStep = "appearance", onComplete }: SetupWiz
         const res = await fetch("/api/gateway/profiles");
         if (res.ok) {
           const data = await res.json();
-          setProfiles(data);
-          if (data.length > 0) setSelectedProfile(data[0].dir);
+          const profileList = data.profiles || data;
+          setProfiles(profileList);
+          if (profileList.length > 0) setSelectedProfile(profileList[0].dir);
+          if (data.recommendedPort) setNewPort(String(data.recommendedPort));
         }
       } catch {}
       setLoadingProfiles(false);
@@ -882,23 +885,40 @@ export function SetupWizard({ initialStep = "appearance", onComplete }: SetupWiz
                               Creates ~/.openclaw-{newName || "name"}
                             </p>
                             <div>
-                              <label
-                                className="text-xs font-medium mb-1.5 block"
-                                style={{ color: "var(--mc-muted)" }}
-                              >
-                                Port
-                              </label>
-                              <Input
-                                value={newPort}
-                                onChange={(e) => setNewPort(e.target.value)}
-                                placeholder="19100"
-                                className="rounded-xl h-10 text-sm"
-                                style={{
-                                  backgroundColor: "var(--mc-surface)",
-                                  borderColor: "var(--mc-border)",
-                                  color: "var(--mc-text)",
-                                }}
-                              />
+                              {showPortEdit ? (
+                                <>
+                                  <label
+                                    className="text-xs font-medium mb-1.5 block"
+                                    style={{ color: "var(--mc-muted)" }}
+                                  >
+                                    Port
+                                  </label>
+                                  <Input
+                                    value={newPort}
+                                    onChange={(e) => setNewPort(e.target.value.replace(/[^0-9]/g, ""))}
+                                    placeholder="19100"
+                                    className="rounded-xl h-10 text-sm"
+                                    style={{
+                                      backgroundColor: "var(--mc-surface)",
+                                      borderColor: "var(--mc-border)",
+                                      color: "var(--mc-text)",
+                                    }}
+                                  />
+                                </>
+                              ) : (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs" style={{ color: "var(--mc-muted)" }}>
+                                    Port: <span style={{ color: "var(--mc-text)" }}>{newPort}</span>
+                                  </span>
+                                  <button
+                                    onClick={() => setShowPortEdit(true)}
+                                    className="text-[10px] underline underline-offset-2"
+                                    style={{ color: "var(--mc-muted)" }}
+                                  >
+                                    Edit
+                                  </button>
+                                </div>
+                              )}
                             </div>
 
                             {errorMsg && (

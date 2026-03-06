@@ -86,11 +86,17 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   const [switchingProfile, setSwitchingProfile] = useState<string | null>(null);
   const [unreads, setUnreads] = useState<UnreadSummary | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  // Track agents the chat page has explicitly marked as busy — SSE must not override these
+  const localBusyRef = useRef<Set<string>>(new Set());
 
-  // Sync agents from SSE live data
+  // Sync agents from SSE live data (preserve local busy overrides)
   useEffect(() => {
     if (live.agents.length > 0) {
-      setAgents(live.agents);
+      const pinned = localBusyRef.current;
+      const merged = (live.agents as unknown as Agent[]).map((a) =>
+        pinned.has(a.id) ? { ...a, busy: true } : a,
+      );
+      setAgents(merged);
     }
   }, [live.agents]);
 
@@ -105,6 +111,11 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   useEffect(() => {
     function handleBusy(e: Event) {
       const { agentId, busy } = (e as CustomEvent).detail;
+      if (busy) {
+        localBusyRef.current.add(agentId);
+      } else {
+        localBusyRef.current.delete(agentId);
+      }
       setAgents((prev) =>
         prev.map((a) => (a.id === agentId ? { ...a, busy } : a)),
       );
@@ -125,7 +136,10 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   const fetchProfiles = useCallback(async () => {
     try {
       const res = await fetch("/api/gateway/profiles");
-      if (res.ok) setProfiles(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setProfiles(data.profiles || data);
+      }
     } catch {}
   }, []);
 
@@ -203,7 +217,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
 
   const sidebarContent = (
     <>
-      {/* Logo */}
+      {/* Logo + collapse toggle */}
       <div className="h-14 flex items-center px-4 border-b" style={{ borderColor: "var(--mc-border)" }}>
         <AnimatePresence mode="wait">
           {!collapsed ? (
@@ -212,7 +226,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="flex items-center gap-3 overflow-hidden"
+              className="flex items-center gap-3 overflow-hidden flex-1"
             >
               <div
                 className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
@@ -240,6 +254,17 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
             </motion.div>
           )}
         </AnimatePresence>
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className="hidden md:flex w-6 h-6 rounded-md items-center justify-center flex-shrink-0 transition-colors"
+          style={{ color: "var(--mc-muted)" }}
+        >
+          {collapsed ? (
+            <ChevronRight className="w-3.5 h-3.5" />
+          ) : (
+            <ChevronLeft className="w-3.5 h-3.5" />
+          )}
+        </button>
       </div>
 
       {/* Profile Selector */}
@@ -260,19 +285,13 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
             }}
           >
             <div className={gwLive ? "status-dot-running" : "status-dot-stopped"} />
-            <span className="truncate flex-1 text-left">
+            <span className="truncate text-left">
               {activeProfile
                 ? activeProfile.name
                 : gwNotSetup
                 ? "Set Up Instance"
                 : gateway?.displayName || "Instance"}
             </span>
-            {unreads && unreads.totalUnreadProfiles > 0 && (
-              <span
-                className="w-2 h-2 rounded-full flex-shrink-0"
-                style={{ backgroundColor: "var(--mc-accent)" }}
-              />
-            )}
             <ChevronDown
               className="w-3 h-3 flex-shrink-0 transition-transform"
               style={{
@@ -280,6 +299,13 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
                 transform: profileDropdownOpen ? "rotate(180deg)" : "rotate(0deg)",
               }}
             />
+            <div className="flex-1" />
+            {unreads && unreads.totalUnreadProfiles > 0 && (
+              <span
+                className="w-2 h-2 rounded-full flex-shrink-0"
+                style={{ backgroundColor: "var(--mc-accent)" }}
+              />
+            )}
           </button>
 
           {/* Dropdown */}
@@ -509,12 +535,6 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
                       <span className="dot" />
                     </span>
                   )}
-                  {!collapsed && !agent.busy && unreads?.activeProfile?.agents?.find((a) => a.agentId === agent.id)?.hasUnread && (
-                    <span
-                      className="w-2 h-2 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: "var(--mc-accent)" }}
-                    />
-                  )}
                 </button>
               </div>
             );
@@ -549,23 +569,6 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
         </div>}
       </nav>
 
-      {/* Collapse toggle — hidden on mobile overlay */}
-      <div className="hidden md:block p-2 border-t" style={{ borderColor: "var(--mc-border)" }}>
-        <button
-          onClick={() => setCollapsed(!collapsed)}
-          className="w-full flex items-center justify-center gap-2 px-2.5 py-2 rounded-lg transition-all duration-150 text-sm"
-          style={{ color: "var(--mc-muted)" }}
-        >
-          {collapsed ? (
-            <ChevronRight className="w-4 h-4" />
-          ) : (
-            <>
-              <ChevronLeft className="w-4 h-4" />
-              <span>Collapse</span>
-            </>
-          )}
-        </button>
-      </div>
     </>
   );
 

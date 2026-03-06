@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getGateway, disconnectGateway, detectProfiles, switchProfile } from "@/lib/gateway";
+import { getGateway, deleteProfile, disconnectGateway, detectProfiles, switchProfile } from "@/lib/gateway";
 
 export async function GET() {
   try {
@@ -28,19 +28,24 @@ export async function DELETE(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const deleteFiles = searchParams.get("deleteFiles") === "true";
-    await disconnectGateway({ deleteFiles });
 
-    // Auto-switch to another existing profile if one is available
-    const remaining = await detectProfiles();
-    if (remaining.length > 0) {
-      const switched = await switchProfile(remaining[0].dir);
-      return NextResponse.json({
-        message: "Switched to profile",
-        switchedTo: switched.profileName,
-      });
+    if (deleteFiles) {
+      // Use deleteProfile() which handles switching to another profile
+      // BEFORE resetting state — avoids a transient "not_setup" that
+      // would trigger the setup wizard via SSE.
+      const gw = await getGateway().catch(() => null);
+      if (gw?.profileDir) {
+        await deleteProfile(gw.profileDir);
+      } else {
+        await disconnectGateway({ deleteFiles: true });
+      }
+    } else {
+      await disconnectGateway({ deleteFiles: false });
     }
 
-    return NextResponse.json({ message: "Gateway disconnected" });
+    // Return the current gateway state so the frontend gets the full picture
+    const current = await getGateway().catch(() => null);
+    return NextResponse.json(current || { status: "not_setup", live: false });
   } catch (err: unknown) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to disconnect gateway" },
