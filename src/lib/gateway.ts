@@ -189,8 +189,21 @@ export async function getGateway(): Promise<Gateway> {
   // Enrich with live check
   gw.live = await checkGatewayAlive(gw.port);
 
+  // Auto-recover: if gateway should be running but isn't alive, restart it
+  if (!gw.live && gw.status !== "not_setup" && gw.status !== "setup" && gw.profileDir) {
+    if (!autoRecoverInFlight) {
+      autoRecoverInFlight = true;
+      startGateway()
+        .then(() => { autoRecoverInFlight = false; })
+        .catch(() => { autoRecoverInFlight = false; });
+    }
+  }
+
   return gw;
 }
+
+// Debounce flag so we don't spam startGateway() on every SSE tick
+let autoRecoverInFlight = false;
 
 export async function updateGateway(updates: Partial<Gateway>): Promise<Gateway> {
   // Strip the `live` field — it's ephemeral, not persisted
@@ -505,7 +518,10 @@ export async function detectProfiles(): Promise<DetectedProfile[]> {
 
 /**
  * Switch the active gateway to a different profile directory.
- * Just updates the gateway singleton pointer — agents are read from filesystem automatically.
+ *
+ * Fast path: just flip the pointer and check if the new gateway is already alive.
+ * If not alive, start it in the background so the UI switch is instant (<500ms).
+ * The old gateway is left running — each profile has its own port, so no conflict.
  */
 export async function switchProfile(profileDir: string): Promise<Gateway> {
   const configPath = join(profileDir, "openclaw.json");
@@ -522,13 +538,7 @@ export async function switchProfile(profileDir: string): Promise<Gateway> {
   const port = config?.gateway?.port ?? config?.gateway?.bind?.port ?? 19100;
   const token = config?.gateway?.auth?.token ?? config?.gateway?.token ?? null;
 
-  // Stop current gateway if running on a different profile
-  const currentState = getGatewayState();
-  if (currentState.status !== "not_setup" && currentState.profileDir !== profileDir) {
-    try { await stopGateway(); } catch {}
-  }
-
-  // Enable HTTP endpoints if needed
+  // Enable HTTP endpoints if needed (fast — just a file write)
   if (!config.gateway) config.gateway = {};
   if (!config.gateway.http?.endpoints?.chatCompletions?.enabled) {
     config.gateway.http = {
@@ -541,39 +551,33 @@ export async function switchProfile(profileDir: string): Promise<Gateway> {
     writeFileSync(configPath, JSON.stringify(config, null, 2));
   }
 
-  // Apply anti-idle settings
+  // Apply anti-idle settings (fast — file read/write)
   ensureGatewayConfig(profileDir);
 
-  // Update gateway singleton to point at new profile
+  // Quick health check — is the target gateway already running?
+  const alreadyAlive = await checkGatewayAlive(port);
+
+  // Update gateway singleton to point at new profile (instant)
   await updateGateway({
     profileDir,
     profileName,
     displayName: profileName,
     port,
     token,
-    status: "stopped",
+    status: alreadyAlive ? "running" : "stopped",
     setupAt: new Date().toISOString(),
     deployId: null,
     pid: null,
   });
 
-  // Check if already running, start if not
-  let live = await checkGatewayAlive(port);
-  if (!live) {
-    try {
-      const started = await startGateway();
-      live = started.live ?? false;
-    } catch {}
-  } else {
-    await updateGateway({ status: "running" });
+  // If not alive, start in the background — don't block the response
+  if (!alreadyAlive) {
+    startGateway().catch(() => {});
   }
 
-  // Clean up ghost ~/.openclaw/ dir that CLI commands create as a side-effect
-  cleanupGhostDirs();
-
-  // Return directly — avoid another getGateway() health check round-trip
+  // Return immediately with current state
   const finalState = getGatewayState();
-  return { ...finalState, live } as Gateway;
+  return { ...finalState, live: alreadyAlive } as Gateway;
 }
 
 /**

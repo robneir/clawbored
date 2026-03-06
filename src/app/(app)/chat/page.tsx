@@ -204,6 +204,8 @@ function ChatPage() {
 
   const gwLive = gateway?.live ?? false;
   const gwDeploying = gateway?.status === "setup" && !!gateway?.deployId;
+  // Gateway is "ready" if it's configured — don't block the UI over transient health check failures
+  const gwReady = gwLive || (!!gateway?.profileDir && gateway?.status !== "not_setup");
 
   // Auto-mark the active agent as read while viewing the chat
   const markActiveAgentRead = useCallback(() => {
@@ -321,10 +323,10 @@ function ChatPage() {
 
   // Auto-focus input when active agent is set or changes
   useEffect(() => {
-    if (activeAgent && gwLive) {
+    if (activeAgent && gwReady) {
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [activeAgent, gwLive]);
+  }, [activeAgent, gwReady]);
 
   function switchAgent(agentId: string) {
     if (agentId === activeAgentRef.current) return; // already viewing this agent
@@ -920,10 +922,8 @@ function ChatPage() {
                 preview = prefix + (text.length > 60 ? text.slice(0, 60) + "..." : text);
               } else if (gwDeploying) {
                 preview = "Setting up...";
-              } else if (gwLive) {
-                preview = "Start a conversation";
               } else {
-                preview = "Gateway offline";
+                preview = "Start a conversation";
               }
 
               return (
@@ -1011,7 +1011,7 @@ function ChatPage() {
                   {activeAgentData.displayName || activeAgentData.id}
                 </h3>
                 <span className="text-[11px]" style={{ color: "var(--mc-muted)" }}>
-                  {gwLive ? `openclaw:${activeAgentData.id}` : gwDeploying ? "Setting up gateway..." : "Gateway offline"}
+                  {gwReady ? `openclaw:${activeAgentData.id}` : gwDeploying ? "Setting up gateway..." : "Connecting..."}
                 </span>
               </div>
               {queuedCount > 0 && (
@@ -1064,11 +1064,6 @@ function ChatPage() {
                     ) : (
                       <>
                         Send a message to {activeAgentData.displayName || activeAgentData.id}
-                        {!gwLive && (
-                          <span className="block mt-1 text-amber-400">
-                            The gateway is offline. Start it first.
-                          </span>
-                        )}
                       </>
                     )}
                   </p>
@@ -1147,7 +1142,7 @@ function ChatPage() {
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={!gwLive}
+                  disabled={!gwReady}
                   className="flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-colors disabled:opacity-30"
                   style={{ color: "var(--mc-muted)" }}
                   title="Attach files"
@@ -1161,15 +1156,15 @@ function ChatPage() {
                   onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
                   placeholder={
-                    gwLive
+                    gwReady
                       ? isStreaming
                         ? "Type \"stop\" to cancel, or send to queue..."
                         : "Send a message..."
                       : gwDeploying
                         ? "Gateway is being set up..."
-                        : "Gateway is offline"
+                        : "Connecting..."
                   }
-                  disabled={!gwLive}
+                  disabled={!gwReady}
                   rows={1}
                   className="flex-1 resize-none bg-transparent outline-none text-sm py-1.5 px-2 max-h-32"
                   style={{ color: "var(--mc-text)" }}
@@ -1192,7 +1187,7 @@ function ChatPage() {
                 ) : (
                   <Button
                     onClick={handleSend}
-                    disabled={(!input.trim() && pendingAttachments.length === 0) || !gwLive}
+                    disabled={(!input.trim() && pendingAttachments.length === 0) || !gwReady}
                     size="sm"
                     className="rounded-lg h-8 w-8 p-0 flex-shrink-0"
                     style={{ backgroundColor: "var(--mc-accent)" }}
