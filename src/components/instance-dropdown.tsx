@@ -26,7 +26,10 @@ export function InstanceDropdown() {
   const fetchProfiles = useCallback(async () => {
     try {
       const res = await fetch("/api/gateway/profiles");
-      if (res.ok) setProfiles(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setProfiles(data.profiles || data);
+      }
     } catch {}
   }, []);
 
@@ -104,6 +107,11 @@ export function InstanceDropdown() {
         <span className="max-w-[120px] truncate font-medium">
           {activeProfile?.name || gateway?.displayName || gateway?.profileName || "No Instance"}
         </span>
+        {gateway?.port && (
+          <span className="text-[10px]" style={{ color: "var(--mc-muted)", opacity: 0.5 }}>
+            :{gateway.port}
+          </span>
+        )}
         <ChevronDown
           className="w-3 h-3 transition-transform"
           style={{
