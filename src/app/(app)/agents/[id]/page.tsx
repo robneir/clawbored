@@ -23,8 +23,7 @@ import { CloneAgentDialog } from "@/components/clone-agent-dialog";
 import { FileTree } from "@/components/file-tree";
 import { FileViewer } from "@/components/file-viewer";
 import { ModelSelector } from "@/components/model-selector";
-import { WhatsAppSetup } from "@/components/whatsapp-setup";
-import { DiscordSetup } from "@/components/discord-setup";
+import { TelegramSetup } from "@/components/telegram-setup";
 import Link from "next/link";
 import { useGateway } from "@/components/gateway-provider";
 
@@ -502,8 +501,7 @@ export default function AgentDetailPage({
 
           <TabsContent value="comms">
             <div className="space-y-4">
-              <WhatsAppSetup agentId={agent.id} />
-              <DiscordSetup agentId={agent.id} />
+              <TelegramSetup agentId={agent.id} />
             </div>
           </TabsContent>
         </Tabs>

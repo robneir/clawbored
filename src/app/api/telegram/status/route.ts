@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getGateway } from "@/lib/gateway";
-import { isWhatsAppConnected, getWhatsAppConfig } from "@/lib/whatsapp";
+import { isTelegramConnected, getTelegramConfig } from "@/lib/telegram";
 
 export async function GET() {
   try {
@@ -9,12 +9,13 @@ export async function GET() {
       return NextResponse.json({ connected: false, configured: false });
     }
 
-    const config = getWhatsAppConfig(gw.profileDir);
-    const connected = isWhatsAppConnected(gw.profileDir);
+    const config = getTelegramConfig(gw.profileDir);
+    const connected = isTelegramConnected(gw.profileDir);
 
     return NextResponse.json({
       connected,
       configured: !!config,
+      botUsername: config?.botUsername || "",
     });
   } catch {
     return NextResponse.json({ connected: false, configured: false });

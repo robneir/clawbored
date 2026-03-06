@@ -101,23 +101,11 @@ export default function DeployPage() {
 
   const isDeploying = phase === "deploying" || (phase === "failed" && !!deployId);
 
-  // Check if gateway is already set up — if so, redirect to dashboard
+  // Skip the initial check — deploy page should always be accessible
+  // so users can create additional instances from the instance dropdown.
   useEffect(() => {
-    async function check() {
-      try {
-        const gwRes = await fetch("/api/gateway");
-        if (gwRes.ok) {
-          const data = await gwRes.json();
-          if (data.status !== "not_setup" && data.status !== "error") {
-            router.replace("/");
-            return;
-          }
-        }
-      } catch {}
-      setPhase("idle");
-    }
-    check();
-  }, [router]);
+    setPhase("idle");
+  }, []);
 
   // Client-side timeout: if deploying for > 3 minutes, force-fail
   useEffect(() => {

@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { getGateway } from "@/lib/gateway";
 import {
-  getAgentWhatsAppBinding,
-  saveAgentWhatsAppBinding,
-  removeAgentWhatsAppBinding,
-} from "@/lib/whatsapp";
+  getAgentTelegramBinding,
+  saveAgentTelegramBinding,
+  removeAgentTelegramBinding,
+} from "@/lib/telegram";
 
 export async function GET(
   _req: Request,
@@ -17,7 +17,7 @@ export async function GET(
       return NextResponse.json({ binding: null });
     }
 
-    const binding = getAgentWhatsAppBinding(gw.profileDir, id);
+    const binding = getAgentTelegramBinding(gw.profileDir, id);
     return NextResponse.json({ binding });
   } catch {
     return NextResponse.json({ binding: null });
@@ -38,7 +38,7 @@ export async function POST(
       );
     }
 
-    saveAgentWhatsAppBinding(gw.profileDir, id);
+    saveAgentTelegramBinding(gw.profileDir, id);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(
@@ -62,7 +62,7 @@ export async function DELETE(
       );
     }
 
-    removeAgentWhatsAppBinding(gw.profileDir, id);
+    removeAgentTelegramBinding(gw.profileDir, id);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(
