@@ -400,7 +400,8 @@ function ChatPage() {
   async function sendToAgent(
     agentId: string,
     content: string,
-    updateMessages: (updater: (msgs: ChatMessage[]) => ChatMessage[]) => void
+    updateMessages: (updater: (msgs: ChatMessage[]) => ChatMessage[]) => void,
+    retryCount?: number
   ) {
     const stored = conversationStore.get(agentId) || [];
     const history = stored
@@ -573,21 +574,27 @@ function ChatPage() {
         return;
       }
 
-      // Detect network / transient errors for friendlier messaging
+      // Detect network / transient errors — auto-retry instead of showing error
       const isNetwork =
         errMsg.includes("Failed to fetch") ||
         errMsg.includes("NetworkError") ||
         errMsg.includes("network") ||
-        errMsg.includes("fetch");
+        errMsg.includes("fetch") ||
+        errMsg.includes("ECONNREFUSED");
 
-      const displayMsg = isNetwork
-        ? "Connection lost — the gateway may be restarting. Try sending your message again."
-        : `Error: ${errMsg}`;
+      if (isNetwork && (retryCount || 0) < 2) {
+        // Remove the empty assistant message, wait, then retry silently
+        updateMessages((msgs) => msgs.filter((m) => m.id !== assistantId));
+        setIsStreaming(false);
+        window.dispatchEvent(new CustomEvent("agent-busy", { detail: { agentId, busy: false } }));
+        await new Promise((r) => setTimeout(r, 2000));
+        return sendToAgent(agentId, content, updateMessages, (retryCount || 0) + 1);
+      }
 
       updateMessages((msgs) =>
         msgs.map((m) =>
           m.id === assistantId
-            ? { ...m, status: "error" as const, content: displayMsg }
+            ? { ...m, status: "error" as const, content: `Error: ${errMsg}` }
             : m
         )
       );
