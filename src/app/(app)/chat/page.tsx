@@ -1014,21 +1014,6 @@ function ChatPage() {
                   {gwLive ? `openclaw:${activeAgentData.id}` : gwDeploying ? "Setting up gateway..." : "Gateway offline"}
                 </span>
               </div>
-              {isStreaming && (
-                <button
-                  onClick={handleStop}
-                  className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-colors"
-                  style={{
-                    backgroundColor: "rgba(239, 68, 68, 0.1)",
-                    color: "#ef4444",
-                    border: "1px solid rgba(239, 68, 68, 0.2)",
-                  }}
-                  title="Stop responding (Esc)"
-                >
-                  <Square className="w-2.5 h-2.5 fill-current" />
-                  Stop
-                </button>
-              )}
               {queuedCount > 0 && (
                 <div
                   className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium"
