@@ -544,6 +544,16 @@ export const fontPresets: FontPreset[] = [
 export const stylePresets: StylePreset[] = [
   // ── Core styles ────────────────────────────────────────
   {
+    name: "floating",
+    label: "Floating",
+    radius: "20px",
+    glassBlur: "0px",
+    surfaceOpacity: 0,
+    borderOpacity: 0.03,
+    spacing: "spacious",
+    sidebarTransparent: true,
+  },
+  {
     name: "glass",
     label: "Glass",
     radius: "16px",
@@ -660,16 +670,6 @@ export const stylePresets: StylePreset[] = [
     surfaceOpacity: 0.06,
     borderOpacity: 0.12,
     spacing: "comfortable",
-  },
-  {
-    name: "floating",
-    label: "Floating",
-    radius: "20px",
-    glassBlur: "0px",
-    surfaceOpacity: 0,
-    borderOpacity: 0,
-    spacing: "spacious",
-    sidebarTransparent: true,
   },
   {
     name: "notebook",
