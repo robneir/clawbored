@@ -36,6 +36,19 @@ export interface StylePreset {
 export const themes: Theme[] = [
   // ── Dark Themes ────────────────────────────────────────
   {
+    name: "slate",
+    label: "Slate",
+    bg: "#161b22",
+    text: "#e6edf3",
+    accent: "#58a6ff",
+    accentHover: "#79c0ff",
+    surface: "rgba(255, 255, 255, 0.03)",
+    surfaceHover: "rgba(255, 255, 255, 0.05)",
+    border: "rgba(255, 255, 255, 0.07)",
+    muted: "#7d8590",
+    sidebar: "#0d1117",
+  },
+  {
     name: "midnight",
     label: "Midnight",
     bg: "#09090b",
@@ -231,19 +244,6 @@ export const themes: Theme[] = [
     sidebar: "#0b140f",
   },
   {
-    name: "slate",
-    label: "Slate",
-    bg: "#161b22",
-    text: "#e6edf3",
-    accent: "#58a6ff",
-    accentHover: "#79c0ff",
-    surface: "rgba(255, 255, 255, 0.03)",
-    surfaceHover: "rgba(255, 255, 255, 0.05)",
-    border: "rgba(255, 255, 255, 0.07)",
-    muted: "#7d8590",
-    sidebar: "#0d1117",
-  },
-  {
     name: "copper",
     label: "Copper",
     bg: "#1a1512",
@@ -377,6 +377,14 @@ export function saveTheme(theme: Theme) {
 export const fontPresets: FontPreset[] = [
   // ── Sans-Serif ─────────────────────────────────────────
   {
+    name: "red-hat",
+    label: "Red Hat",
+    bodyFont: '"Red Hat Display", sans-serif',
+    headingFont: '"Red Hat Display", sans-serif',
+    monoFont: '"Red Hat Mono", monospace',
+    googleFontsUrl: "https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;600;700&family=Red+Hat+Mono:wght@400;500&display=swap",
+  },
+  {
     name: "system",
     label: "System Default",
     bodyFont: '"Inter", system-ui, -apple-system, sans-serif',
@@ -486,14 +494,6 @@ export const fontPresets: FontPreset[] = [
     headingFont: '"Lexend", sans-serif',
     monoFont: '"Geist Mono", monospace',
     googleFontsUrl: "https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&display=swap",
-  },
-  {
-    name: "red-hat",
-    label: "Red Hat",
-    bodyFont: '"Red Hat Display", sans-serif',
-    headingFont: '"Red Hat Display", sans-serif',
-    monoFont: '"Red Hat Mono", monospace',
-    googleFontsUrl: "https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;600;700&family=Red+Hat+Mono:wght@400;500&display=swap",
   },
   {
     name: "source-sans",
