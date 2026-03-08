@@ -126,7 +126,7 @@ export function AutofixPanel({ sessionId, onClose }: AutofixPanelProps) {
           style={{ color: statusColor }}
         />
         <span className="text-xs font-medium flex-1" style={{ color: "var(--mc-text)" }}>
-          Claude Code Auto-Fix
+          AI Auto-Fix
         </span>
         <span className="text-[10px]" style={{ color: statusColor }}>
           {statusLabel}
@@ -167,7 +167,7 @@ export function AutofixPanel({ sessionId, onClose }: AutofixPanelProps) {
               {logs.length === 0 && phase === "running" && (
                 <div className="flex items-center gap-2 py-2" style={{ color: "var(--mc-muted)" }}>
                   <Loader2 className="w-3 h-3 animate-spin" />
-                  <span>Connecting to Claude Code...</span>
+                  <span>Connecting to auto-fix engine...</span>
                 </div>
               )}
               {logs.map((log, i) => (

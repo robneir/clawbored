@@ -1518,7 +1518,7 @@ function MessageBubble({
                   style={{ color: "var(--mc-accent)" }}
                 >
                   <Wand2 className="w-2.5 h-2.5" />
-                  Fix with Claude
+                  Auto-fix
                 </button>
               )}
             </>
