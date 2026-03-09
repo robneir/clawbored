@@ -3,6 +3,7 @@ import { getGateway } from "@/lib/gateway";
 import { getAgent, updateAgent } from "@/lib/agents";
 import { CURATED_MODELS } from "@/lib/models";
 import { listProviderKeysRaw } from "@/lib/provider-keys";
+import { refreshExpiredOAuthTokens } from "@/lib/oauth-refresh";
 
 type ProviderId = "anthropic" | "openai";
 
@@ -15,6 +16,33 @@ function isRateLimitError(status: number, text: string): boolean {
     lower.includes("too many requests") ||
     lower.includes("throttle")
   );
+}
+
+function isAuthError(status: number, text: string): boolean {
+  if (status === 401 || status === 403) return true;
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("authentication") ||
+    lower.includes("unauthorized") ||
+    lower.includes("forbidden") ||
+    lower.includes("oauth") ||
+    lower.includes("token refresh") ||
+    lower.includes("api key") ||
+    lower.includes("invalid_api_key")
+  );
+}
+
+function isProviderFailure(status: number, text: string): boolean {
+  const lower = text.toLowerCase();
+  if (status >= 500 && status < 600) {
+    return (
+      lower.includes("internal error") ||
+      lower.includes("api_error") ||
+      lower.includes("provider") ||
+      lower.includes("upstream")
+    );
+  }
+  return false;
 }
 
 function inferProviderFromModel(model?: string): ProviderId | null {
@@ -94,6 +122,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const refreshedProviderSet = new Set<string>();
+    if (gw.profileDir) {
+      try {
+        const refreshed = await refreshExpiredOAuthTokens(gw.profileDir);
+        refreshed.refreshed.forEach((p) => refreshedProviderSet.add(p));
+      } catch {
+        // Non-fatal. We still have provider fallback handling below.
+      }
+    }
+
     const url = `http://127.0.0.1:${gw.port}/v1/chat/completions`;
 
     // Use a longer timeout for streaming (agent tasks can run for minutes).
@@ -123,9 +161,52 @@ export async function POST(req: NextRequest) {
     if (!openclawRes.ok) {
       const errText = await openclawRes.text().catch(() => "Unknown error");
       let finalErrText = errText;
-      const shouldTryFallback = isRateLimitError(openclawRes.status, errText);
+      const shouldTryFallback =
+        isRateLimitError(openclawRes.status, errText) ||
+        isAuthError(openclawRes.status, errText) ||
+        isProviderFailure(openclawRes.status, errText);
 
       if (shouldTryFallback) {
+        // Try to heal auth issues in-place first before switching providers/models.
+        if (isAuthError(openclawRes.status, errText) && gw.profileDir) {
+          try {
+            const refreshed = await refreshExpiredOAuthTokens(gw.profileDir);
+            refreshed.refreshed.forEach((p) => refreshedProviderSet.add(p));
+            if (refreshed.refreshed.length > 0) {
+              openclawRes = await makeRequest();
+              if (openclawRes.ok) {
+                const contentType = openclawRes.headers.get("content-type") || "";
+                const isSSE = contentType.includes("text/event-stream");
+
+                if (stream && isSSE && openclawRes.body) {
+                  return new Response(openclawRes.body, {
+                    headers: {
+                      "Content-Type": "text/event-stream",
+                      "Cache-Control": "no-cache",
+                      Connection: "keep-alive",
+                      ...(refreshedProviderSet.size > 0
+                        ? { "X-MC-Recovered-Auth": Array.from(refreshedProviderSet).join(",") }
+                        : {}),
+                    },
+                  });
+                }
+
+                const data = await openclawRes.json();
+                return NextResponse.json(data, {
+                  headers: {
+                    ...(refreshedProviderSet.size > 0
+                      ? { "X-MC-Recovered-Auth": Array.from(refreshedProviderSet).join(",") }
+                      : {}),
+                  },
+                });
+              }
+              finalErrText = await openclawRes.text().catch(() => finalErrText);
+            }
+          } catch {
+            // Continue into provider fallback flow below.
+          }
+        }
+
         let currentModel = "default";
         let failedProvider = inferProviderFromError(errText);
 
@@ -161,11 +242,17 @@ export async function POST(req: NextRequest) {
       }
 
       if (!openclawRes.ok) {
+        const reconnectRequired = isAuthError(openclawRes.status, finalErrText);
         return NextResponse.json(
           {
             error: fallbackApplied
               ? `OpenClaw error (${openclawRes.status}): ${finalErrText}. Auto-fallback switched model to '${fallbackTarget}', but the retry still failed.`
               : `OpenClaw error (${openclawRes.status}): ${finalErrText}`,
+            reconnectRequired,
+            recovery: {
+              refreshedProviders: Array.from(refreshedProviderSet),
+              fallbackModel: fallbackApplied ? fallbackTarget : null,
+            },
           },
           { status: openclawRes.status }
         );
@@ -181,13 +268,28 @@ export async function POST(req: NextRequest) {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
+          ...(refreshedProviderSet.size > 0
+            ? { "X-MC-Recovered-Auth": Array.from(refreshedProviderSet).join(",") }
+            : {}),
+          ...(fallbackApplied && fallbackTarget
+            ? { "X-MC-Recovered-Fallback-Model": fallbackTarget }
+            : {}),
         },
       });
     }
 
     // Non-streaming response — return as JSON
     const data = await openclawRes.json();
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: {
+        ...(refreshedProviderSet.size > 0
+          ? { "X-MC-Recovered-Auth": Array.from(refreshedProviderSet).join(",") }
+          : {}),
+        ...(fallbackApplied && fallbackTarget
+          ? { "X-MC-Recovered-Fallback-Model": fallbackTarget }
+          : {}),
+      },
+    });
   } catch (err: unknown) {
     const raw = err instanceof Error ? err.message : "Chat request failed";
     // Translate low-level errors to user-friendly messages

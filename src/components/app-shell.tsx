@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Menu, Loader2, Server } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Sidebar } from "./sidebar";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 import { GatewayProvider, useGateway } from "./gateway-provider";
 import { LiveProvider } from "./live-provider";
 import { SetupWizard } from "./setup-wizard";
@@ -19,6 +19,8 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [onboardingState, setOnboardingState] = useState<OnboardingState>("loading");
   const wizardActiveRef = useRef(false);
+  const lastAuthToastAtRef = useRef(0);
+  const lastAuthErrorRef = useRef("");
 
   useEffect(() => {
     if (loading) {
@@ -101,6 +103,65 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     localStorage.setItem("mc-onboarding-complete", "true");
     setOnboardingState("ready");
   }, []);
+
+  useEffect(() => {
+    if (onboardingState !== "ready") return;
+
+    const maybeToast = (message: string, type: "success" | "error") => {
+      const now = Date.now();
+      if (now - lastAuthToastAtRef.current < 45_000) return;
+      lastAuthToastAtRef.current = now;
+      if (type === "success") toast.success(message);
+      else toast.error(message);
+    };
+
+    const checkAuthHealth = async () => {
+      try {
+        const res = await fetch("/api/auth/health?refresh=1");
+        if (!res.ok) return;
+        const data = await res.json() as {
+          refreshedProviders?: string[];
+          refreshErrors?: string[];
+        };
+
+        if (Array.isArray(data.refreshedProviders) && data.refreshedProviders.length > 0) {
+          maybeToast(`Reconnected automatically (${data.refreshedProviders.join(", ")})`, "success");
+        }
+
+        if (Array.isArray(data.refreshErrors) && data.refreshErrors.length > 0) {
+          const key = data.refreshErrors.join("|");
+          if (key !== lastAuthErrorRef.current) {
+            lastAuthErrorRef.current = key;
+            maybeToast("Could not refresh subscription automatically. Reconnect may be required.", "error");
+          }
+        } else {
+          lastAuthErrorRef.current = "";
+        }
+      } catch {
+        // Silent by default; chat request path still does on-demand recovery.
+      }
+    };
+
+    void checkAuthHealth();
+
+    const interval = setInterval(checkAuthHealth, 3 * 60 * 1000);
+    const onFocus = () => void checkAuthHealth();
+    const onOnline = () => void checkAuthHealth();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void checkAuthHealth();
+    };
+
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [onboardingState]);
 
   // ── Loading ──
   if (onboardingState === "loading") {

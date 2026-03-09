@@ -377,7 +377,16 @@ function runRunnerProcess(
     }
 
     let streamFailure: string | null = null;
+    let terminalErrorFromOutput = false;
     let timedOut = false;
+
+    const isBenignStderr = (text: string): boolean => {
+      const lower = text.toLowerCase();
+      return (
+        lower.includes("could not update path") ||
+        lower.includes("warning: proceeding")
+      );
+    };
 
     const hardTimeout = setTimeout(() => {
       timedOut = true;
@@ -392,6 +401,9 @@ function runRunnerProcess(
         const parsed = runner.parser(line);
         if (!parsed) return;
         addLog(sessionId, parsed.message, parsed.type);
+        if (runner.id === "claude" && parsed.type === "error") {
+          terminalErrorFromOutput = true;
+        }
         if (parsed.type === "error" && !streamFailure) {
           streamFailure = parsed.message;
         }
@@ -403,6 +415,10 @@ function runRunnerProcess(
       rl.on("line", (line) => {
         const text = line.trim();
         if (!text) return;
+        if (isBenignStderr(text)) {
+          addLog(sessionId, text, "system");
+          return;
+        }
         addLog(sessionId, text, "error");
         if (!streamFailure) streamFailure = text;
       });
@@ -417,7 +433,7 @@ function runRunnerProcess(
         return;
       }
 
-      if (code === 0 && !streamFailure) {
+      if (code === 0 && !terminalErrorFromOutput) {
         addLog(sessionId, "Complete", "result");
         resolve({ success: true });
         return;

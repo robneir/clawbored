@@ -414,10 +414,32 @@ function ChatPage() {
         toast.error(err.error || "Failed to start auto-fix");
         return;
       }
-      const { sessionId } = await res.json();
+      const { sessionId, refreshedProviders } = await res.json();
+      if (Array.isArray(refreshedProviders) && refreshedProviders.length > 0) {
+        toast.success(`Refreshed ${refreshedProviders.join(", ")} auth automatically`);
+      }
       setAutofixSessionId(sessionId);
     } catch {
       toast.error("Failed to start auto-fix");
+    }
+  }
+
+  function handleRecoverySignals(res: Response) {
+    const recoveredAuth = res.headers.get("x-mc-recovered-auth");
+    if (recoveredAuth) {
+      toast.success(`Reconnected automatically (${recoveredAuth})`);
+    }
+
+    const fallbackModel = res.headers.get("x-mc-recovered-fallback-model");
+    if (fallbackModel) {
+      toast.message(`Switched model automatically to ${fallbackModel}`);
+      if (activeAgentData) {
+        setAgents((prev) =>
+          prev.map((a) =>
+            a.id === activeAgentData.id ? { ...a, model: fallbackModel } : a
+          )
+        );
+      }
     }
   }
 
@@ -511,9 +533,16 @@ function ChatPage() {
         }),
         signal: controller.signal,
       });
+      handleRecoverySignals(res);
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({ error: "Unknown error" }));
+        const errData = await res.json().catch(() => ({ error: "Unknown error" })) as {
+          error?: string;
+          reconnectRequired?: boolean;
+        };
+        if (errData.reconnectRequired) {
+          toast.error("Automatic recovery failed. Reconnect your provider in Settings.");
+        }
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
 
@@ -592,8 +621,14 @@ function ChatPage() {
             const diagData = await diagRes.json();
             errorDetail = diagData.choices?.[0]?.message?.content || "";
           } else {
-            const diagErr = await diagRes.json().catch(() => ({}));
+            const diagErr = await diagRes.json().catch(() => ({})) as {
+              error?: string;
+              reconnectRequired?: boolean;
+            };
             errorDetail = diagErr.error || "";
+            if (diagErr.reconnectRequired) {
+              toast.error("Automatic recovery failed. Reconnect your provider in Settings.");
+            }
           }
         } catch {}
 
